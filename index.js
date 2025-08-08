@@ -3,14 +3,17 @@ export class Engine {
 
   #providers;
   #interceptors;
-  #engineFeed;
   #queryControllers;
 
   constructor({ providers, interceptors, hooks }) {
     this.#providers = new Map();
     this.#interceptors = interceptors || [];
-    this.#engineFeed = new EventTarget();
     this.#queryControllers = hooks?.createQueryControllersMap?.() ?? new Map();
+    this.feed = new EventTarget();
+
+    if (!providers) {
+      return;
+    }
 
     const resolveProvider = (name, depsPath) => {
       const ProviderClass = providers[name];
@@ -24,7 +27,7 @@ export class Engine {
       }
 
       const resolvedDeps = {};
-      for (const depName of ProviderClass.deps) {
+      for (const depName of ProviderClass.deps ?? []) {
         resolvedDeps[depName] = resolveProvider(depName, nextPath);
       }
 
@@ -38,7 +41,6 @@ export class Engine {
     }
   }
 
-  
   #resolveDeps(depsConfig, cacheObj) {
     let resolvedDeps = cacheObj?.[Engine.#resolvedDepsCache];
     if (resolvedDeps) {
@@ -50,36 +52,45 @@ export class Engine {
       return resolvedDeps;
     }
 
-    for (const name of Object.keys(depsConfig)) {
-      const provider = this.#providers.get(name);
-      if (!provider) {
-        throw new Error(`Dependency not found: ${name}`);
-      }
+    if (Array.isArray(depsConfig)) {
+      for (const name of depsConfig) {
+        const provider = this.#providers.get(name);
+        if (!provider) {
+          throw new Error(`Dependency not found: ${name}`);
+        }
 
-      const options = Array.isArray(depsConfig) ? {} : depsConfig[name];
-      resolvedDeps[name] = { provider, options };
+        resolvedDeps[name] = { provider };
+      }
+    } else {
+      for (const name of Object.keys(depsConfig)) {
+        const provider = this.#providers.get(name);
+        if (!provider) {
+          throw new Error(`Dependency not found: ${name}`);
+        }
+
+        resolvedDeps[name] = {
+          provider,
+          options: depsConfig[name]
+        };
+      }
     }
+
     return resolvedDeps;
   }
 
-  /**
-   * Dispatches an action, managing the resource lifecycle.
-   * This method is non-blocking and returns an EventTarget immediately.
-   * @param {Action} actionInstance
-   * @returns {EventTarget} The dispatch feed for this specific action.
-   */
+  // Dispatch an action.
   dispatch(actionInstance) {
     if (!(actionInstance instanceof Action)) {
-      throw new TypeError('dispatch() requires an instance of Action.');
+      throw new TypeError('dispatch() requires an instance of Action');
     }
 
     const dispatchFeed = new EventTarget();
-    
-    (async () => {
+
+    setTimeout(async () => {
       const enteredInterceptors = [];
       let state = {};
       let error = null;
-  
+
       try {
         // Phase 1: Run 'enter' interceptors. Build the stack of entered interceptors.
         for (const interceptor of this.#interceptors) {
@@ -93,7 +104,7 @@ export class Engine {
               }
               const newState = await interceptor.enter(interceptorResources, { 
                 dispatchFeed, 
-                engineFeed: this.#engineFeed, 
+                engineFeed: this.feed, 
                 state, 
                 action: actionInstance 
               });
@@ -109,7 +120,7 @@ export class Engine {
             }
           }
         }
-  
+
         // Phase 2: Obtain and execute the main action, releasing resources immediately after.
         try {
           const actionDeps = this.#resolveDeps(actionInstance.constructor.deps, actionInstance.constructor);
@@ -119,7 +130,7 @@ export class Engine {
           }
           await actionInstance.execute(resources, {
             dispatchFeed,
-            engineFeed: this.#engineFeed,
+            engineFeed: this.feed,
             state
           });
         } finally {
@@ -175,7 +186,7 @@ export class Engine {
                 }
                 const newState = await interceptor.leave(interceptorResources, { 
                   dispatchFeed, 
-                  engineFeed: this.#engineFeed, 
+                  engineFeed: this.feed, 
                   state, 
                   action: actionInstance 
                 });
@@ -191,11 +202,10 @@ export class Engine {
               }
             }
           } catch (e) {
-            // If a leave/error hook fails, we re-capture the error and ensure it is propagated.
             error = e;
           }
         }
-        
+
         // Phase 4: If an error was never handled, dispatch an event.
         if (error) {
           dispatchFeed.dispatchEvent(new ErrorEvent('error', { error: error, message: error.message }));
@@ -203,22 +213,30 @@ export class Engine {
           dispatchFeed.dispatchEvent(new Event('complete'));
         }
       }
-    })();
-    
+    });
+
     return dispatchFeed;
   }
 
   #createQueryController(queryInstance) {
     const queryDeps = this.#resolveDeps(queryInstance.constructor.deps, queryInstance.constructor);
-    const engineFeed = this.#engineFeed;
+    const engineFeed = this.feed;
     const engine = this;
+    const received = Promise.withResolvers();
+    let hadValue = false;
 
     return {
       resources: {},
       observers: new Set(),
+      received: received.promise,
 
       notify(nextValue) {
         this.currentValue = nextValue;
+
+        if (!hadValue) {
+          hadValue = true;
+          received.resolve(true);
+        }
 
         for (const observer of this.observers) {
           try {
@@ -237,7 +255,7 @@ export class Engine {
             this.resources[name] = await provider.obtain(options);
           }
 
-          queryInstance.boot(
+          queryInstance.boot?.(
             this.resources,
             {
               notify: this.notify.bind(this),
@@ -262,7 +280,7 @@ export class Engine {
             this.killFeed = engine.dispatch(queryInstance.killAction);
           }
           if (queryInstance.kill) {
-            await queryInstance.kill(
+            await queryInstance.kill?.(
               this.resources,
               {
                 bootFeed: this.bootFeed,
@@ -283,6 +301,10 @@ export class Engine {
           }
 
           this.observers.clear();
+
+          if (!hadValue) {
+            received.resolve(false);
+          }
         } catch (err) {
           console.error(err);
         } finally {
@@ -295,14 +317,13 @@ export class Engine {
     };
   }
 
-  /**
-   * Executes a query, managing the resource lifecycle for the duration of the subscription.
-   * @param {Query} queryInstance
-   * @returns {object} An object with subscribe method (Observable stub).
-   */
+  // Realizes a query.  Call `subscribe` on the returned object
+  // to use it as an RxJS style observable, or `peek` to get a
+  // look at the current value if the query is active, or fetch
+  // it otherwise.
   query(queryInstance) {
     if (!(queryInstance instanceof Query)) {
-      throw new TypeError('query() requires an instance of Query.');
+      throw new TypeError('query() requires an instance of Query');
     }
 
     return {
@@ -329,10 +350,11 @@ export class Engine {
       },
       peek: async () => {
         const controller = this.#queryControllers.get(queryInstance);
-        if (controller) {
+        if (controller && await controller.received) {
           return controller.currentValue;
         }
 
+        const queryDeps = this.#resolveDeps(queryInstance.constructor.deps, queryInstance.contructor);
         const resources = {};
         try {
           for (const [name, { provider, options }] of Object.entries(queryDeps)) {
@@ -342,7 +364,7 @@ export class Engine {
           return await queryInstance.fetch(
             resources,
             {
-              engineFeed: this.#engineFeed,
+              engineFeed: this.feed,
               bootFeed: this.bootFeed,
               killFeed: this.killFeed,
             }
@@ -374,42 +396,33 @@ export class Engine {
   }
 }
 
-/**
- * The base class for all providers, which manage external resources.
- */
-export class Provider {
-  #deps;
-  constructor(deps) {
-    this.#deps = deps;
-  }
-  static deps = [];
-  async obtain(options = {}) { throw new Error('obtain() not implemented'); }
-  release(resource, options = {}) { throw new Error('release() not implemented'); }
 
-  /**
-   * Creates a provider that manages a single shared resource (singleton).
-   * @param {any} resource The single, shared resource.
-   * @returns {Provider} A new Provider instance.
-   */
+// The base class for all providers, which manage external resources.
+export class Provider {
+  static deps = [];
+
+  async obtain(options = {}) {
+    throw new Error('obtain() not implemented');
+  }
+
+  release(resource, options = {}) {
+    throw new Error('release() not implemented');
+  }
+
+  
+  // Creates a provider that manages a single shared resource (singleton).
   static fromSingleton(resource) {
-    return new class extends Provider {
+    return class extends Provider {
       async obtain() {
         return resource;
       }
       release() {
         // Nothing to do for a singleton
       }
-    }();
+    };
   }
 
-  /**
-   * Creates a provider that manages a pool of static resources.
-   * @param {function(): any} create A function that creates a new resource.
-   * @param {function(any): void} destroy A function to destroy a resource.
-   * @param {object} [options]
-   * @param {number} [options.size=10] The maximum size of the resource pool.
-   * @returns {Provider} A new Provider instance.
-   */
+  // Creates a provider that manages a pool of static resources.
   static fromPool(create, destroy, size) {
     const available = [];
     const inUse = new Set();
@@ -434,7 +447,7 @@ export class Provider {
         );
       }
     };
-    
+
     const releaseResource = (resource) => {
       if (inUse.has(resource)) {
         if (disposed) {
@@ -453,7 +466,7 @@ export class Provider {
       }
     };
 
-    return new class extends Provider {
+    return class extends Provider {
       async obtain() {
         return await getResource();
       }
@@ -477,16 +490,11 @@ export class Provider {
         }
         available.length = 0;
       }
-    }();
+    };
   }
 
-  /**
-   * Creates a provider for a single shared resource that is lazily created and
-   * ref-counted, and destroyed when the count drops to zero.
-   * @param {function(): Promise<any>} create An async function to create the resource.
-   * @param {function(any): Promise<void>} destroy An async function to destroy the resource.
-   * @returns {Provider} A new Provider instance.
-   */
+  // Creates a provider for a single shared resource that is lazily created and
+  // ref-counted, and destroyed when the count drops to zero.
   static fromRefCounted(create, destroy) {
     let refCount = 0;
     let resource = null;
@@ -501,7 +509,7 @@ export class Provider {
         resource = await creationPromise;
       } else if (creationPromise) {
         // A creation is in progress, so wait for it to complete.
-        await creationPromise;
+          await creationPromise;
       }
       return resource;
     };
@@ -521,31 +529,34 @@ export class Provider {
       }
     };
 
-    return new class extends Provider {
+    return class extends Provider {
       async obtain() {
         return await obtain();
       }
       release() {
         release();
       }
-    }();
+    };
   }
 }
 
-/**
- * The base class for all actions, which perform data mutations.
- */
 export class Action {
   static deps = {};
-  async execute(deps, feeds) { throw new Error('execute() not implemented'); }
+  async execute(_deps, _context) {
+    throw new Error('execute() not implemented');
+  }
 }
 
-/**
- * The base class for all queries, which fetch and watch data.
- */
 export class Query {
   static deps = {};
-  async boot(deps, feeds) { throw new Error('boot() not implemented'); }
-  async kill(deps, feeds) { throw new Error('kill() not implemented'); }
-  async peek(deps, feeds) { throw new Error('peek() not implemented'); }
+  async boot(_deps, _context) {
+    throw new Error('boot() not implemented');
+  }
+
+  async kill(_deps, _context) {
+    throw new Error('kill() not implemented');
+  }
+  async peek(_deps, _context) {
+    throw new Error('peek() not implemented');
+  }
 }
