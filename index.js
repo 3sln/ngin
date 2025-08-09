@@ -556,7 +556,7 @@ export class Query {
   async kill(_deps, _context) {
     throw new Error('kill() not implemented');
   }
-  async peek(_deps, _context) {
+  async fetch(_deps, _context) {
     throw new Error('peek() not implemented');
   }
 }
