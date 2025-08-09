@@ -1,6 +1,8 @@
-# NGIN: Your Frontend State Management Engine
-
-`ngin` is a lightweight and flexible state management library designed to help you organize your frontend application logic. It uses a dependency injection model to coordinate resources, actions, and queries, keeping your code clean and testable.
+# ngin
+`ngin` is a lightweight and flexible state management library designed to help
+you organize your frontend application logic. It uses a dependency injection
+model to coordinate resources, actions, and queries, keeping your code clean
+and testable.
 
 ## Quick Start
 
@@ -112,10 +114,13 @@ await engine.dispose();
 -----
 
 ## Provider Options
+You can configure dependencies for actions, interceptors, or queries with an
+options object. This object is passed as the first argument to the provider's
+`obtain` method.
 
-You can configure dependencies for actions, interceptors, or queries with an options object. This object is passed as the first argument to the provider's `obtain` method.
-
-For these components, you can specify dependencies using an object instead of an array. The values of this object are the options passed to the corresponding provider.
+For these components, you can specify dependencies using an object instead of
+an array. The values of this object are the options passed to the corresponding
+provider.
 
 ```javascript
 class MyProviderWithOptions extends Provider {
@@ -147,11 +152,9 @@ engine.dispatch(new MyActionWithOptions());
 -----
 
 ## Built-in Provider Implementations
-
 `ngin` offers three built-in provider types for resource management.
 
 ### Singleton Provider
-
 Perfect for resources that are globally shared.
 
 ```javascript
@@ -159,8 +162,8 @@ const mySingletonProvider = Provider.fromSingleton({ database: 'my-db-instance' 
 ```
 
 ### Pool Provider
-
-Ideal for managing a fixed number of resources, like a pool of database connections.
+Ideal for managing a fixed number of resources, like a pool of database
+connections.
 
 ```javascript
 const createConnection = async () => new DatabaseConnection();
@@ -169,8 +172,8 @@ const myPoolProvider = Provider.fromPool(createConnection, destroyConnection, 10
 ```
 
 ### Reference-Counted Provider
-
-Use this for resources that are lazily created and destroyed only when no longer in use.
+Use this for resources that are lazily created and destroyed only when no
+longer in use.
 
 ```javascript
 const createResource = async () => new ExpensiveResource();
