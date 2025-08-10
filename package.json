@@ -1,5 +1,5 @@
 {
-  "name": "ngin",
+  "name": "@3sln/ngin",
   "module": "index.js",
   "type": "module",
   "devDependencies": {
