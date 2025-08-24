@@ -540,23 +540,5 @@ export class Provider {
   }
 }
 
-export class Action {
-  static deps = {};
-  async execute(_deps, _context) {
-    throw new Error('execute() not implemented');
-  }
-}
-
-export class Query {
-  static deps = {};
-  async boot(_deps, _context) {
-    throw new Error('boot() not implemented');
-  }
-
-  async kill(_deps, _context) {
-    throw new Error('kill() not implemented');
-  }
-  async fetch(_deps, _context) {
-    throw new Error('peek() not implemented');
-  }
-}
+export class Action {}
+export class Query {}
