@@ -92,7 +92,7 @@ export class Engine {
       let error = null;
 
       try {
-        // Phase 1: Run 'enter' interceptors. Build the stack of entered interceptors.
+        // Phase 1: Run 'enter' interceptors.
         for (const interceptor of this.#interceptors) {
           enteredInterceptors.push(interceptor);
           if (interceptor.enter) {
@@ -121,11 +121,14 @@ export class Engine {
           }
         }
 
-        // Phase 2: Obtain and execute the main action, releasing resources immediately after.
+        // Phase 2: Obtain and execute the main action.
+        const staticDeps = this.#resolveDeps(actionInstance.constructor.deps, actionInstance.constructor);
+        const instanceDeps = this.#resolveDeps(actionInstance.deps, actionInstance);
+        const allDeps = { ...staticDeps, ...instanceDeps };
+        
+        const resources = {};
         try {
-          const actionDeps = this.#resolveDeps(actionInstance.constructor.deps, actionInstance.constructor);
-          const resources = {};
-          for (const [name, { provider, options }] of Object.entries(actionDeps)) {
+          for (const [name, { provider, options }] of Object.entries(allDeps)) {
             resources[name] = await provider.obtain(options);
           }
           await actionInstance.execute(resources, {
@@ -134,12 +137,7 @@ export class Engine {
             state
           });
         } finally {
-          // Since actionDeps and resources are scoped to this block, we need to re-resolve
-          // the deps to ensure cleanup even if a resource fails to be obtained.
-          const actionDeps = this.#resolveDeps(actionInstance.constructor.deps, actionInstance.constructor);
-          const resources = {};
-          for (const [name, { provider, options }] of Object.entries(actionDeps)) {
-            // This check is important to prevent attempting to release a non-obtained resource.
+          for (const [name, { provider, options }] of Object.entries(allDeps)) {
             if (Object.prototype.hasOwnProperty.call(resources, name)) {
               provider.release(resources[name], options);
             }
@@ -149,7 +147,6 @@ export class Engine {
         error = e;
       } finally {
         // Phase 3: Unwind the stack.
-        // Run leave/error hooks in reverse order of entry.
         for (let i = enteredInterceptors.length - 1; i >= 0; i--) {
           const interceptor = enteredInterceptors[i];
           try {
@@ -206,7 +203,6 @@ export class Engine {
           }
         }
 
-        // Phase 4: If an error was never handled, dispatch an event.
         if (error) {
           dispatchFeed.dispatchEvent(new ErrorEvent('error', { error: error, message: error.message }));
         } else {
@@ -219,7 +215,10 @@ export class Engine {
   }
 
   #createQueryController(queryInstance) {
-    const queryDeps = this.#resolveDeps(queryInstance.constructor.deps, queryInstance.constructor);
+    const staticDeps = this.#resolveDeps(queryInstance.constructor.deps, queryInstance.constructor);
+    const instanceDeps = this.#resolveDeps(queryInstance.deps, queryInstance);
+    const queryDeps = { ...staticDeps, ...instanceDeps };
+
     const engineFeed = this.feed;
     const engine = this;
     const received = Promise.withResolvers();
@@ -235,6 +234,7 @@ export class Engine {
 
         if (!hadValue) {
           hadValue = true;
+          this.hasValue = true;
           received.resolve(true);
         }
 
@@ -255,7 +255,7 @@ export class Engine {
             this.resources[name] = await provider.obtain(options);
           }
 
-          queryInstance.boot?.(
+          await queryInstance.boot?.(
             this.resources,
             {
               notify: this.notify.bind(this),
@@ -309,8 +309,10 @@ export class Engine {
           console.error(err);
         } finally {
           for (const [name, { provider, options }] of Object.entries(queryDeps)) {
-            provider.release(this.resources[name], options);
-            delete this.resources[name];
+            if (Object.prototype.hasOwnProperty.call(this.resources, name)) {
+              provider.release(this.resources[name], options);
+              delete this.resources[name];
+            }
           }
         }
       }
@@ -327,10 +329,17 @@ export class Engine {
     }
 
     return {
-      subscribe: observer => {
+      subscribe: (observerOrNext) => {
+        const observer = (typeof observerOrNext === 'function')
+            ? { next: observerOrNext }
+            : (observerOrNext || {});
+
         let controller = this.#queryControllers.get(queryInstance);
         if (controller) {
           controller.observers.add(observer);
+          if (controller.hasValue) {
+            observer.next?.(controller.currentValue);
+          }
         } else {
           controller = this.#createQueryController(queryInstance);
           this.#queryControllers.set(queryInstance, controller);
@@ -354,7 +363,10 @@ export class Engine {
           return controller.currentValue;
         }
 
-        const queryDeps = this.#resolveDeps(queryInstance.constructor.deps, queryInstance.contructor);
+        const staticDeps = this.#resolveDeps(queryInstance.constructor.deps, queryInstance.constructor);
+        const instanceDeps = this.#resolveDeps(queryInstance.deps, queryInstance);
+        const queryDeps = { ...staticDeps, ...instanceDeps };
+
         const resources = {};
         try {
           for (const [name, { provider, options }] of Object.entries(queryDeps)) {

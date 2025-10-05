@@ -151,6 +151,17 @@ engine.dispatch(new MyActionWithOptions());
 
 -----
 
+## Provider Lifecycle: `obtain`, `release`, and `dispose`
+Providers manage the lifecycle of the resources they provide.
+
+- **`obtain(options)`**: This method is called whenever a consumer (like an Action or Query) needs a resource. It's responsible for creating or acquiring the resource. It can optionally receive an `options` object from the consumer.
+
+- **`release(resource, options)`**: This is the counterpart to `obtain`. It's called after the consumer has finished its work. For providers that manage a pool of resources, this is where you would return the `resource` to the pool. For singleton-like providers, this method is often a no-op.
+
+- **`dispose()`**: This optional method is called on all providers when the `engine.dispose()` method is invoked. It is the correct place to perform permanent cleanup of a provider's underlying resources, such as closing database connections, terminating web sockets, or completing observable streams.
+
+-----
+
 ## Built-in Provider Implementations
 `ngin` offers three built-in provider types for resource management.
 
