@@ -1,4 +1,8 @@
 # ngin
+
+> [!WARNING]
+> This is a work-in-progress project and is not yet ready for production use.
+
 `ngin` is a lightweight and flexible state management library designed to help
 you organize your frontend application logic. It uses a dependency injection
 model to coordinate resources, actions, and queries, keeping your code clean

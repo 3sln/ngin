@@ -1,8 +1,28 @@
 {
   "name": "@3sln/ngin",
-  "module": "index.js",
+  "version": "0.0.1",
+  "description": "A lightweight, dependency-injection based state management library.",
+  "main": "index.js",
   "type": "module",
+  "author": "Ray Stubbs",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/3sln/ngin.git"
+  },
+  "license": "MIT",
+  "keywords": [
+    "state management",
+    "dependency injection",
+    "flux",
+    "cqrs"
+  ],
+  "files": [
+    "index.js"
+  ],
   "devDependencies": {
     "@types/bun": "latest"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
