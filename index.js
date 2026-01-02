@@ -31,7 +31,7 @@ export class Engine {
         resolvedDeps[depName] = resolveProvider(depName, nextPath);
       }
 
-      const provider = new ProviderClass(resolvedDeps);
+      const provider = new ProviderClass(resolvedDeps, {engineFeed: this.feed});
       this.#providers.set(name, provider);
       return provider;
     };
@@ -400,6 +400,14 @@ export class Engine {
 
     for (const provider of this.#providers.values()) {
       try {
+        await provider.flush?.();
+      } catch (err) {
+        console.log(err);
+      }
+    }
+
+    for (const provider of this.#providers.values()) {
+      try {
         await provider.dispose?.();
       } catch (err) {
         console.log(err);
@@ -421,21 +429,30 @@ export class Provider {
     throw new Error('release() not implemented');
   }
 
+  async flush() {}
+
   
   // Creates a provider that manages a single shared resource (singleton).
-  static fromSingleton(resource) {
+  static fromSingleton(resource, {dispose} = {}) {
     return class extends Provider {
       async obtain() {
         return resource;
       }
+
       release() {
         // Nothing to do for a singleton
+      }
+
+      async dispose() {
+        if (typeof(dispose) === 'function') {
+          await dispose(resource);
+        }
       }
     };
   }
 
   // Creates a provider that manages a pool of static resources.
-  static fromPool(create, destroy, size) {
+  static fromPool(create, destroy, {size = 1, deps = []} = {}) {
     const available = [];
     const inUse = new Set();
     const waiting = [];
@@ -460,15 +477,16 @@ export class Provider {
       }
     };
 
-    const releaseResource = (resource) => {
+    const releaseResource = (resource, deps) => {
       if (inUse.has(resource)) {
         if (disposed) {
           try {
-            destroy(resource);
+            destroy(resource, deps);
           } catch(err) {
             console.error(err);
           }
-        } if (waiting.length > 0) {
+          inUse.delete(resource);
+        } else if (waiting.length > 0) {
           const resolve = waiting.shift().resolve;
           resolve(resource);
         } else {
@@ -479,12 +497,22 @@ export class Provider {
     };
 
     return class extends Provider {
+      static deps = deps;
+      #deps;
+
+      constructor(deps) {
+        super();
+        this.#deps = deps;
+      }
+
       async obtain() {
-        return await getResource();
+        return await getResource(this.#deps);
       }
+
       release(resource) {
-        releaseResource(resource);
+        releaseResource(resource, this.#deps);
       }
+
       dispose() {
         disposed = true;
 
@@ -495,7 +523,7 @@ export class Provider {
 
         for (const resource of available) {
           try {
-            destroy(resource);
+            destroy(resource, this.#deps);
           } catch(err) {
             console.error(err);
           }
@@ -507,17 +535,17 @@ export class Provider {
 
   // Creates a provider for a single shared resource that is lazily created and
   // ref-counted, and destroyed when the count drops to zero.
-  static fromRefCounted(create, destroy) {
+  static fromRefCounted(create, destroy, {deps = []} = {}) {
     let refCount = 0;
     let resource = null;
     let creationPromise = null;
     let isDestroying = false;
 
-    const obtain = async () => {
+    const obtain = async (deps) => {
       refCount++;
       if (refCount === 1) {
         isDestroying = false;
-        creationPromise = create();
+        creationPromise = create(deps);
         resource = await creationPromise;
       } else if (creationPromise) {
         // A creation is in progress, so wait for it to complete.
@@ -526,12 +554,12 @@ export class Provider {
       return resource;
     };
 
-    const release = async () => {
+    const release = async (deps) => {
       refCount--;
       if (refCount <= 0 && resource && !isDestroying) {
         isDestroying = true;
         try {
-          await destroy(resource);
+          await destroy(resource, deps);
         } finally {
           resource = null;
           refCount = 0;
@@ -542,11 +570,19 @@ export class Provider {
     };
 
     return class extends Provider {
+      static deps = deps;
+      #deps;
+
+      constructor(deps) {
+        super();
+        this.#deps = deps;
+      }
+
       async obtain() {
-        return await obtain();
+        return await obtain(this.#deps);
       }
       release() {
-        release();
+        release(this.#deps);
       }
     };
   }

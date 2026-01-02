@@ -155,12 +155,14 @@ engine.dispatch(new MyActionWithOptions());
 
 -----
 
-## Provider Lifecycle: `obtain`, `release`, and `dispose`
+## Provider Lifecycle: `obtain`, `release`, `flush`, and `dispose`
 Providers manage the lifecycle of the resources they provide.
 
 - **`obtain(options)`**: This method is called whenever a consumer (like an Action or Query) needs a resource. It's responsible for creating or acquiring the resource. It can optionally receive an `options` object from the consumer.
 
 - **`release(resource, options)`**: This is the counterpart to `obtain`. It's called after the consumer has finished its work. For providers that manage a pool of resources, this is where you would return the `resource` to the pool. For singleton-like providers, this method is often a no-op.
+
+- **`flush()`**: This optional method is called on all providers when the `engine.dispose()` method is invoked, just before the `dispose` methods are called. This is the ideal place to perform any finalization that needs to happen before resources are permanently cleaned up, especially if that finalization requires using other providers.
 
 - **`dispose()`**: This optional method is called on all providers when the `engine.dispose()` method is invoked. It is the correct place to perform permanent cleanup of a provider's underlying resources, such as closing database connections, terminating web sockets, or completing observable streams.
 
@@ -183,7 +185,7 @@ connections.
 ```javascript
 const createConnection = async () => new DatabaseConnection();
 const destroyConnection = (conn) => conn.close();
-const myPoolProvider = Provider.fromPool(createConnection, destroyConnection, 10);
+const myPoolProvider = Provider.fromPool(createConnection, destroyConnection, {size: 10});
 ```
 
 ### Reference-Counted Provider

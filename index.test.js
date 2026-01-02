@@ -326,7 +326,7 @@ test('singleton provider', async () => {
 test('pool provider', async () => {
   const mockCreate = mock(async () => ({ id: Math.random() }));
   const mockDestroy = mock();
-  const poolProvider = new (Provider.fromPool(mockCreate, mockDestroy, 2))();
+  const poolProvider = new (Provider.fromPool(mockCreate, mockDestroy, {size: 2}))();
   let resource1, resource2;
 
   resource1 = await poolProvider.obtain();
