@@ -1,6 +1,6 @@
 {
   "name": "@3sln/ngin",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "A lightweight, dependency-injection based state management library.",
   "main": "index.js",
   "type": "module",

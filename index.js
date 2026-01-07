@@ -425,9 +425,7 @@ export class Provider {
     throw new Error('obtain() not implemented');
   }
 
-  release(resource, options = {}) {
-    throw new Error('release() not implemented');
-  }
+  release(resource, options = {}) {}
 
   async flush() {}
 
@@ -588,5 +586,14 @@ export class Provider {
   }
 }
 
-export class Action {}
-export class Query {}
+export class Action {
+  execute() {
+    throw new Error('execute() not implemented');
+  }
+}
+export class Query {
+  boot() {
+    throw new Error('boot() not implemented');
+  }
+  kill() {}
+}
