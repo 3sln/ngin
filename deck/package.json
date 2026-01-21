@@ -1,0 +1,37 @@
+{
+  "name": "ngin-deck",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "deck-build"
+  },
+  "dependencies": {
+    "@3sln/ngin": "file:../",
+    "@3sln/deck": "0.0.14"
+  },
+  "devDependencies": {
+    "vite": "^5.4.20"
+  },
+  "@3sln/deck": {
+    "title": "Ngin Deck",
+    "pinned": [
+      "/introduction.md",
+      "/providers.md",
+      "/actions.md",
+      "/queries.md",
+      "/interceptors.md"
+    ],
+    "build": {
+      "importMap": {
+        "imports": {
+          "@3sln/ngin": "/lib/ngin/index.js"
+        }
+      },
+      "pick": {
+        "../index.js": "lib/ngin/index.js"
+      }
+    }
+  }
+}
