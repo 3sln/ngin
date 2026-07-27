@@ -58,17 +58,26 @@ const ConfigProvider = Provider.fromSingleton({
 
 ### Pool
 
-Use `Provider.fromPool` to manage a pool of resources. This is useful for things like database connections or workers. You can also specify dependencies that will be passed to the `create` and `destroy` functions.
+Use `Provider.fromPool` to manage a pool of resources. This is useful for things like database connections or workers. You can also specify dependencies, which are passed to the `create` and `destroy` functions **as providers**, so `create` decides how long each one is held for.
 
 ```javascript
 import { Provider } from '@3sln/ngin';
 
 const createWorker = async ({ config }) => {
-  return new Worker(config.workerPath);
+  // `config` is a provider.  The path is all we keep, so obtain and release
+  // it around the read.
+  const cfg = await config.obtain();
+  try {
+    return new Worker(cfg.workerPath);
+  } finally {
+    config.release(cfg);
+  }
 };
 
-const terminateWorker = (worker, { logger }) => {
-  logger.log('Terminating worker');
+const terminateWorker = async (worker, { logger }) => {
+  const log = await logger.obtain();
+  log.log('Terminating worker');
+  logger.release(log);
   worker.terminate();
 };
 
@@ -77,7 +86,7 @@ const WorkerPoolProvider = Provider.fromPool(
   terminateWorker, 
   {
     size: 4, 
-    deps: ['config', 'logger'] // Dependencies passed to create/destroy
+    deps: ['config', 'logger'] // Dependency providers passed to create/destroy
   }
 );
 ```
@@ -99,10 +108,21 @@ const closeSocket = (ws) => ws.close();
 const SocketProvider = Provider.fromRefCounted(createSocket, closeSocket);
 ```
 
-> The `deps` given to a built-in factory arrive at `create` and `destroy` as
-> *resources*, already obtained and released again around the call. Providers
-> you write by hand receive the dependency *providers* in their constructor
-> instead, and manage those lifecycles themselves.
+### Dependency Lifetimes
+
+Every *resource manager* — a provider you write by hand, or a `create` /
+`destroy` / `dispose` callback you give to one of the factories — receives its
+dependencies as **providers**, and decides how long to hold each one.
+
+That distinction matters. A resource built by `create` usually outlives the
+call, so it has to be able to keep a dependency for its own lifetime: obtain in
+`create`, release in `destroy`. Being handed an already-obtained resource
+instead would mean the resource is released the moment `create` returns, while
+the thing that depends on it is still running.
+
+*Consumers* — actions, queries and interceptors — are the other way around.
+They do not manage lifetimes, so they receive already-obtained **resources**,
+released for them when their work finishes.
 
 ## The Container
 

@@ -25,7 +25,14 @@ const container = new Container({
   providers: {
     config: Provider.fromSingleton({ apiUrl: 'https://api.example.com' }),
     api: Provider.fromRefCounted(
-      ({ config }) => new ApiClient(config.apiUrl),
+      async ({ config }) => {
+        const cfg = await config.obtain();
+        try {
+          return new ApiClient(cfg.apiUrl);
+        } finally {
+          config.release(cfg);
+        }
+      },
       (api) => api.close(),
       { deps: ['config'] }
     ),

@@ -144,7 +144,14 @@ const container = new Container({
   providers: {
     config: Provider.fromSingleton({ apiUrl: 'https://api.example.com' }),
     api: Provider.fromRefCounted(
-      ({ config }) => new ApiClient(config.apiUrl),
+      async ({ config }) => {
+        const cfg = await config.obtain();
+        try {
+          return new ApiClient(cfg.apiUrl);
+        } finally {
+          config.release(cfg);
+        }
+      },
       (api) => api.close(),
       { deps: ['config'] }
     ),
@@ -302,17 +309,43 @@ const myRefCountedProvider = Provider.fromRefCounted(createResource, destroyReso
 ### Dependencies in the built-ins
 
 All three factories take a `deps` option. Those dependencies arrive at
-`create`, `destroy` and `dispose` as **resources** — obtained before the call
-and released after it — not as providers:
+`create`, `destroy` and `dispose` as **providers** — the same thing a provider
+written by hand receives in its constructor — so the resource you build can
+hold a dependency for its own lifetime:
 
 ```javascript
 const ConnectionProvider = Provider.fromPool(
-  ({ config }) => connect(config.url),      // `config` is the resource
-  (conn, { logger }) => { logger.log('closing'); conn.close(); },
-  { size: 10, deps: ['config', 'logger'] }
+  async ({ credentials }) => {
+    // Obtained in create, held by the connection, released in destroy.
+    const creds = await credentials.obtain();
+    return { conn: await connect(creds), credentials, creds };
+  },
+  async ({ conn, credentials, creds }) => {
+    await conn.close();
+    credentials.release(creds);
+  },
+  { size: 10, deps: ['credentials'] }
 );
 ```
 
-Providers you write by hand are the other way around: their constructor
-receives the dependency *providers*, and they manage those lifecycles
-themselves.
+If a dependency is only read at creation time, obtain and release it around
+that read:
+
+```javascript
+const WorkerProvider = Provider.fromPool(
+  async ({ config }) => {
+    const cfg = await config.obtain();
+    try {
+      return new Worker(cfg.workerPath);   // only the path is retained
+    } finally {
+      config.release(cfg);
+    }
+  },
+  (worker) => worker.terminate(),
+  { size: 4, deps: ['config'] }
+);
+```
+
+Actions, queries and interceptors are the other way around: they are consumers
+rather than resource managers, so they receive already-obtained **resources**,
+released for them when their work finishes.

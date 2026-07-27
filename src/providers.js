@@ -7,31 +7,6 @@ import { report } from './internal.js';
 
 const DISPOSED = 'The provider has been disposed';
 
-// Obtains the resources behind a provider's own injected dependencies, runs
-// `fn` with them, and releases them again.  The built-in factories use this so
-// that their `create`/`destroy`/`dispose` callbacks are handed *resources*,
-// the same way actions and queries are, rather than raw providers.
-async function withDepResources(depProviders, fn) {
-  const resources = {};
-  const held = [];
-
-  try {
-    for (const [name, provider] of Object.entries(depProviders ?? {})) {
-      resources[name] = await provider.obtain();
-      held.push([name, provider]);
-    }
-    return await fn(resources);
-  } finally {
-    for (const [name, provider] of held) {
-      try {
-        await provider.release(resources[name]);
-      } catch (err) {
-        report(err);
-      }
-    }
-  }
-}
-
 // The base class for all providers, which manage external resources.
 export class Provider {
   static deps = [];
@@ -43,6 +18,14 @@ export class Provider {
   release(resource, options = {}) {}
 
   async flush() {}
+
+  // The `create`, `destroy` and `dispose` callbacks below are handed the
+  // dependency *providers*, not their resources -- the same thing a provider
+  // written by hand gets in its constructor.  That is deliberate: a resource
+  // built by `create` usually outlives the call, so it has to be able to hold
+  // a dependency for its own lifetime (obtain in `create`, release in
+  // `destroy`).  Handing over an already-obtained resource would release it
+  // out from under the thing still using it.
 
   // Creates a provider that manages a single shared resource (singleton).
   static fromSingleton(resource, { dispose, deps = [] } = {}) {
@@ -72,7 +55,7 @@ export class Provider {
         this.#disposed = true;
 
         if (typeof dispose === 'function') {
-          await withDepResources(this.#deps, (deps) => dispose(resource, deps));
+          await dispose(resource, this.#deps);
         }
       }
     };
@@ -106,7 +89,7 @@ export class Provider {
 
       async #destroySafely(resource) {
         try {
-          await withDepResources(this.#deps, (deps) => destroy(resource, deps));
+          await destroy(resource, this.#deps);
         } catch (err) {
           report(err);
         }
@@ -130,7 +113,8 @@ export class Provider {
           this.#slots++;
           // The slot is reserved before awaiting, so a concurrent obtain sees
           // it as taken and the pool never exceeds `size`.
-          withDepResources(this.#deps, (deps) => create(deps))
+          Promise.resolve()
+            .then(() => create(this.#deps))
             .then(
               (resource) => {
                 if (this.#disposed) {
@@ -233,7 +217,7 @@ export class Provider {
         }
 
         if (!this.#creation) {
-          this.#creation = withDepResources(this.#deps, (deps) => create(deps));
+          this.#creation = Promise.resolve().then(() => create(this.#deps));
         }
 
         try {
@@ -275,7 +259,7 @@ export class Provider {
             // Creation may still be in flight; destroy what it produces.
             const created = resource ?? (await creation.catch(() => null));
             if (created != null) {
-              await withDepResources(this.#deps, (deps) => destroy(created, deps));
+              await destroy(created, this.#deps);
             }
           } catch (err) {
             report(err);

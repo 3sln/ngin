@@ -177,7 +177,7 @@ test('container disposes dependents before their dependencies', async () => {
   await expect(container.lease(['base'])).rejects.toThrow('disposed');
 });
 
-test('singleton provider passes dep resources to dispose and disposes once', async () => {
+test('singleton provider passes dep providers to dispose and disposes once', async () => {
   const dispose = mock();
   const container = new Container({
     providers: {
@@ -191,7 +191,9 @@ test('singleton provider passes dep resources to dispose and disposes once', asy
   await thing.dispose();
 
   expect(dispose).toHaveBeenCalledTimes(1);
-  expect(dispose).toHaveBeenLastCalledWith('resource', { config: { url: 'x' } });
+  expect(dispose).toHaveBeenLastCalledWith('resource', {
+    config: container.get('config'),
+  });
 });
 
 test('pool never exceeds its size under concurrent obtains', async () => {
@@ -230,9 +232,14 @@ test('pool hands a failed create to the caller without stranding waiters', async
   expect(await second).toEqual({ n: 2 });
 });
 
-test('pool passes dependency resources to create and destroy', async () => {
-  const create = mock(async ({ config }) => ({ url: config.url }));
-  const destroy = mock();
+test('pool passes dependency providers to create and destroy', async () => {
+  // A dependency reaches create/destroy as a provider, so the created resource
+  // can hold it for its own lifetime instead of just reading it once.
+  const create = mock(async ({ config }) => {
+    const cfg = await config.obtain();
+    return { url: cfg.url, config, cfg };
+  });
+  const destroy = mock((conn) => conn.config.release(conn.cfg));
 
   const container = new Container({
     providers: {
@@ -241,14 +248,16 @@ test('pool passes dependency resources to create and destroy', async () => {
     },
   });
 
+  const configProvider = container.get('config');
   const pool = container.get('conn');
+
   const conn = await pool.obtain();
-  expect(conn).toEqual({ url: 'db://x' });
-  expect(create).toHaveBeenLastCalledWith({ config: { url: 'db://x' } });
+  expect(conn.url).toBe('db://x');
+  expect(create).toHaveBeenLastCalledWith({ config: configProvider });
 
   pool.release(conn);
   await pool.dispose();
-  expect(destroy).toHaveBeenLastCalledWith(conn, { config: { url: 'db://x' } });
+  expect(destroy).toHaveBeenLastCalledWith(conn, { config: configProvider });
 });
 
 test('pool rejects obtains once disposed', async () => {
@@ -302,6 +311,33 @@ test('ref counted provider does not recreate on top of an in-flight destroy', as
   await provider.release();
   expect(destroy).toHaveBeenCalledTimes(2);
   expect(destroy).toHaveBeenLastCalledWith(second, {});
+});
+
+test('a created resource can hold a dependency for its own lifetime', async () => {
+  // This is the reason create/destroy get providers rather than resources: the
+  // session has to stay obtained for as long as the client that uses it lives.
+  const closeSession = mock();
+
+  const container = new Container({
+    providers: {
+      session: Provider.fromRefCounted(async () => ({ id: 's1' }), closeSession),
+      client: Provider.fromRefCounted(
+        async ({ session }) => ({ session, handle: await session.obtain() }),
+        async (client) => await client.session.release(client.handle),
+        { deps: ['session'] }
+      ),
+    },
+  });
+
+  const client = container.get('client');
+  const resource = await client.obtain();
+  expect(resource.handle.id).toBe('s1');
+
+  // The session is still held while the client is alive.
+  expect(closeSession).not.toHaveBeenCalled();
+
+  await client.release();
+  expect(closeSession).toHaveBeenCalledTimes(1);
 });
 
 test('ref counted release below zero is a no-op', async () => {
