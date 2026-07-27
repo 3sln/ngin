@@ -22,10 +22,186 @@ function messageOf(error) {
   return error && typeof error.message === 'string' ? error.message : String(error);
 }
 
+// The event an aborted dispatch ends on.  `reason` is what `abort()` was given;
+// `error` is set only if the action threw on its way out, so nothing is lost by
+// reporting the abort instead of the throw.
+class DispatchAbortEvent extends Event {
+  constructor({ reason, error = null } = {}) {
+    super('abort');
+    this.reason = reason;
+    this.error = error;
+  }
+}
+
+// How a dispatch can end.  All three are terminal: exactly one fires, once.
+const TERMINAL = ['complete', 'error', 'abort'];
+
 export class Action {
   execute() {
     throw new Error('execute() not implemented');
   }
+}
+
+// The channel a dispatch reports on.
+//
+// Still an EventTarget, and still the only way results leave an action -- an
+// action that emits `progress` five times and then `result` is saying more than
+// a return value could.  Two things are layered on top:
+//
+//   feed.abort(reason)  -- the caller is no longer interested.  `signal` is
+//                          handed to the action and its interceptors, so the
+//                          work can stop; cooperatively, since nothing can
+//                          interrupt a running function.
+//   feed.next(names)    -- await one of `names`.  This is the shape a request
+//                          handler wants: dispatch, await the event that
+//                          carries the answer, reply.
+//
+// A dispatch ends on exactly one of `complete`, `error` or `abort`.  An aborted
+// one ends on `abort` and never on `complete`, because a scan that was stopped
+// at thirty percent did not complete, and saying it did is how "it worked" gets
+// reported about work that did not happen.
+//
+// `next` treats all three as terminal unless you ask for one by name.  A promise
+// that never settles is the worst thing this could do to a caller -- there is no
+// timeout, no cancellation, and no error to log -- and an action that ends
+// without emitting what was awaited would otherwise hang it forever.
+export class DispatchFeed extends EventTarget {
+  #controller = new AbortController();
+  #settled = null; // { type, event } once complete/error has fired
+
+  constructor() {
+    super();
+    // Registered before any caller's listener, so `settled` is already true by
+    // the time their handler runs. This is what lets `next()` answer a caller
+    // that arrives after the action is over instead of waiting for an event
+    // that can no longer fire.
+    for (const type of TERMINAL) {
+      this.addEventListener(
+        type,
+        (event) => { this.#settled ??= { type, event }; },
+        { once: true }
+      );
+    }
+  }
+
+  // Aborted when the caller gives up. Handed to the action, and to every
+  // interceptor, as `signal`.
+  get signal() {
+    return this.#controller.signal;
+  }
+
+  // The terminal event, if the dispatch is over: `'complete'`, `'error'`, or
+  // null while it is still running.
+  get settled() {
+    return this.#settled?.type ?? null;
+  }
+
+  // Stop caring about this dispatch.  The action decides when to notice --
+  // there is no way to interrupt a running function -- but anything waiting on
+  // `next()` rejects at once, because the point of aborting is not to wait.
+  abort(reason) {
+    this.#controller.abort(reason);
+  }
+
+  /**
+   * Resolve with the first of `names` to fire.
+   *
+   * @param {string|string[]} names event name, or names, to wait for
+   * @param {{signal?: AbortSignal}} [options] the caller's own cancellation,
+   *   separate from `feed.abort()` -- an HTTP handler passes the request's
+   *   signal here so a disconnect unblocks it without aborting the action.
+   * @returns {Promise<Event>} the event that fired
+   */
+  next(names, { signal } = {}) {
+    const wanted = new Set(Array.isArray(names) ? names : [names]);
+    if (wanted.size === 0) {
+      throw new TypeError('next() requires at least one event name');
+    }
+
+    // Aborting and then awaiting `abort` is the ordinary wind-down: you have
+    // stopped caring about the answer but still need to know the work stopped,
+    // to release something or to reply.  So a wait for the abort event is not
+    // pre-empted by the abort itself -- everything else is, because the point of
+    // giving up is not to keep waiting for the action to notice.
+    const awaitingTheEnd = wanted.has('abort');
+
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      if (this.#controller.signal.aborted && !awaitingTheEnd && !this.#settled) {
+        reject(this.#controller.signal.reason);
+        return;
+      }
+      // Already over.  Answer from what was recorded rather than waiting for an
+      // event that has fired once and will not fire again.
+      if (this.#settled) {
+        this.#finish(resolve, reject, this.#settled, wanted);
+        return;
+      }
+
+      // One controller unregisters every listener below at once, on whichever
+      // path settles first.
+      const stop = new AbortController();
+      const options = { signal: stop.signal };
+      const settle = (fn) => (value) => {
+        stop.abort();
+        fn(value);
+      };
+
+      for (const name of wanted) {
+        this.addEventListener(name, settle(resolve), options);
+      }
+      // Every terminal event not asked for by name ends the wait, because after
+      // one of them nothing else will ever fire.
+      for (const type of TERMINAL) {
+        if (wanted.has(type)) {
+          continue;
+        }
+        this.addEventListener(
+          type,
+          (event) => settle(reject)(endedWithout(type, event, wanted)),
+          options
+        );
+      }
+      if (!awaitingTheEnd) {
+        this.#controller.signal.addEventListener(
+          'abort',
+          () => settle(reject)(this.#controller.signal.reason),
+          options
+        );
+      }
+      signal?.addEventListener('abort', () => settle(reject)(signal.reason), options);
+    });
+  }
+
+  #finish(resolve, reject, settled, wanted) {
+    if (wanted.has(settled.type)) {
+      resolve(settled.event);
+    } else {
+      reject(endedWithout(settled.type, settled.event, wanted));
+    }
+  }
+}
+
+// Why a wait ended without what it was waiting for.  The action's own error and
+// the abort reason are handed back unwrapped, so a caller mapping them onto
+// something else -- an HTTP status, say -- still can.
+function endedWithout(type, event, wanted) {
+  if (type === 'error') {
+    return event.error;
+  }
+  if (type === 'abort') {
+    return event.reason;
+  }
+  return missing(wanted);
+}
+
+function missing(wanted) {
+  return new Error(
+    `The dispatch completed without emitting ${[...wanted].map((n) => `'${n}'`).join(' or ')}`
+  );
 }
 
 // Runs actions through a stack of interceptors.
@@ -56,7 +232,7 @@ export class Dispatcher {
     const container = this.#container;
     const interceptors = this.#interceptors;
     const engineFeed = container.feed;
-    const dispatchFeed = new EventTarget();
+    const dispatchFeed = new DispatchFeed();
 
     setTimeout(async () => {
       const enteredInterceptors = [];
@@ -83,6 +259,7 @@ export class Dispatcher {
               interceptor.enter(resources, {
                 dispatchFeed,
                 engineFeed,
+                signal: dispatchFeed.signal,
                 state,
                 action: actionInstance,
               })
@@ -100,6 +277,10 @@ export class Dispatcher {
           await actionInstance.execute(lease.resources, {
             dispatchFeed,
             engineFeed,
+            // Cooperative: aborting cannot interrupt a running function, so an
+            // action that wants to be stoppable checks this, or hands it to
+            // something that does (fetch, a scan loop, another dispatch).
+            signal: dispatchFeed.signal,
             state,
           });
         } finally {
@@ -116,6 +297,7 @@ export class Dispatcher {
               const errorContext = {
                 dispatchFeed,
                 engineFeed,
+                signal: dispatchFeed.signal,
                 action: actionInstance,
                 state,
                 error,
@@ -134,6 +316,7 @@ export class Dispatcher {
                   interceptor.leave(resources, {
                     dispatchFeed,
                     engineFeed,
+                    signal: dispatchFeed.signal,
                     state,
                     action: actionInstance,
                   })
@@ -145,7 +328,16 @@ export class Dispatcher {
           }
         }
 
-        if (error) {
+        // An aborted dispatch ends on `abort`, whatever the action did on its
+        // way out. It did not complete -- it was stopped -- and an action that
+        // threw because it honoured the signal threw *because* of the abort, so
+        // reporting the throw would name the symptom rather than the cause. The
+        // error is carried on the event either way, so nothing is lost.
+        if (dispatchFeed.signal.aborted) {
+          dispatchFeed.dispatchEvent(
+            new DispatchAbortEvent({ reason: dispatchFeed.signal.reason, error })
+          );
+        } else if (error) {
           dispatchFeed.dispatchEvent(
             new DispatchErrorEvent('error', { error, message: messageOf(error) })
           );
