@@ -449,6 +449,45 @@ const destroyResource = (res) => res.cleanup();
 const myRefCountedProvider = Provider.fromRefCounted(createResource, destroyResource);
 ```
 
+### Lazy Singleton Provider
+For a long-lived backbone — a database handle, a storage client, a search index:
+built once, lazily, shared by every consumer at once, and destroyed only when
+the container is.
+
+```javascript
+const myBackboneProvider = Provider.fromLazySingleton(
+  async ({ config }) => {
+    const cfg = await config.obtain();
+    const db = new Database(cfg.url);
+    await db.connect();          // building is async, and often ordered
+    return db;
+  },
+  (db) => db.close(),
+  { deps: ['config'] }
+);
+```
+
+`release` is a synchronous no-op: consumers that lease the backbone on every
+request should not pay teardown on the way out. The resource goes down in
+`dispose`, and since the container disposes in reverse construction order,
+teardown order falls out of the dependency graph instead of being maintained by
+hand.
+
+The other three do not cover this case, and the ways they miss are worth knowing:
+
+| | lazy build | concurrent consumers | destroyed on `release` |
+| --- | --- | --- | --- |
+| `fromSingleton` | no — needs it already built | yes | no |
+| `fromPool({size: 1})` | yes | **no — it is a mutex** | returned to the pool |
+| `fromRefCounted` | yes | yes | **yes, at zero** |
+| `fromLazySingleton` | yes | yes | no |
+
+A pool of one blocks the second `obtain` until the first releases, so one slow
+consumer stops every other. `fromRefCounted` shares correctly, but an ordinary
+lease/release cycle drops the count to zero and tears the resource down — the
+next consumer then silently gets a *different* one while whatever held the old
+is still pointing at it.
+
 ### Dependencies in the built-ins
 
 All three factories take a `deps` option. Those dependencies arrive at
