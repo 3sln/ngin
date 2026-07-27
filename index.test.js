@@ -94,7 +94,7 @@ test('action execution error produces error event', async () => {
     once: true
   });
 
-  expect(async () => await error.promise).toThrow('errored');
+  await expect(error.promise).rejects.toThrow('errored');
 });
 
 test('interceptors enter/leave order', async () => {

@@ -29,7 +29,19 @@ class CurrentTimeQuery extends Query {
 
 ## Using Queries
 
-To use a query, you pass an instance to `engine.query()`. This returns an object with a `subscribe` method (compatible with RxJS).
+To use a query, you pass an instance to `engine.query()`, or to a `QueryStore`
+directly if you do not need the rest of the library. This returns an object
+with a `subscribe` method (compatible with RxJS).
+
+```javascript
+import { Container } from '@3sln/ngin/providers';
+import { QueryStore } from '@3sln/ngin/queries';
+
+const queries = new QueryStore({ container: new Container({ providers }) });
+
+// `engine.query(...)` delegates to exactly this.
+queries.query(new CurrentTimeQuery());
+```
 
 ```javascript
 const query = engine.query(new CurrentTimeQuery());
@@ -44,11 +56,28 @@ subscription.unsubscribe();
 
 ## Peeking at Values
 
-You can also use `peek()` to get the current value without subscribing. If the query is active (has subscribers), it returns the last emitted value. If not, it can trigger a fetch (if `fetch` method is implemented).
+You can also use `peek()` to get the current value without subscribing.
 
 ```javascript
 const time = await query.peek();
 ```
+
+An **active** query -- one with subscribers -- answers the peek itself: you get
+its last emitted value, or, if it has not emitted yet, you wait for its first
+one. An **inactive** query is answered by calling its `fetch` method, and
+`peek()` throws if the query does not implement one.
+
+> A live query that never emits leaves `peek()` pending until it is killed.
+> That is deliberate: `fetch` is not used as a shortcut past a query that is
+> already running, because the two can disagree. If you cannot block, race the
+> peek against a timeout yourself.
+
+## Completion
+
+`complete()` is called on observers that are still attached when a query dies
+-- because the store was disposed, or because `boot` threw. It is **not**
+called on an observer that unsubscribes, the same as RxJS: withdrawing is not
+the query ending. Use it as a signal that the source went away underneath you.
 
 ## Dependencies in Queries
 
@@ -70,6 +99,7 @@ class UserQuery extends Query {
     // Maybe set up a socket listener for updates...
   }
 }
+```
 
 ## Query Context
 
@@ -104,6 +134,20 @@ class MouseQuery extends Query {
 ## Lifecycle Actions
 
 Queries can trigger actions automatically when they start (`boot`) or stop (`kill`) by setting the `bootAction` and `killAction` properties.
+
+A `QueryStore` used on its own has nothing to dispatch through, so it needs a
+dispatcher for these:
+
+```javascript
+const queries = new QueryStore({ container, dispatcher });
+```
+
+An `Engine` wires that up for you.
+
+Lifecycle actions are fire-and-forget: nothing waits on their result. If one
+fails, the failure is reported on `console.error` naming the query and the
+action, since there is no caller to propagate it to. To react to one, listen on
+the `bootFeed` your query is given.
 
 ```javascript
 class UserQuery extends Query {

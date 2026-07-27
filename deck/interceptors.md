@@ -22,7 +22,7 @@ const myInterceptor = {
     logger.log(`${action.constructor.name} completed in ${duration}ms`);
   },
 
-  async error({ logger }, { action, state, error, handled }) {
+  async error({ logger }, { action, state, error, handled, dispatchFeed, engineFeed }) {
     logger.error(`${action.constructor.name} failed:`, error);
     
     // Custom error handling logic...
@@ -62,9 +62,18 @@ const errorInterceptor = {
 };
 ```
 
+## Unwinding a Failed `enter`
+
+An interceptor whose `enter` throws is still unwound: its own `error` handler
+runs, then the ones outside it. This means an interceptor's `error` can be
+called even though its `enter` never completed, so keep error handlers
+tolerant of partially-established state.
+
 ## Registering Interceptors
 
-Interceptors are registered when creating the `Engine` instance.
+Interceptors are registered when creating the `Engine` instance, or the
+`Dispatcher` if you are using the actions layer directly. The list is copied at
+construction time; mutating it afterwards has no effect.
 
 ```javascript
 const engine = new Engine({

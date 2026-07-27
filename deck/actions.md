@@ -41,7 +41,22 @@ The second argument to `execute` is a context object containing:
 
 ## Dispatching Actions
 
-Actions are dispatched via the `Engine`. The `dispatch` method returns the `dispatchFeed` for that action.
+Actions are dispatched via the `Engine`, or via a `Dispatcher` directly if you
+do not need queries. The `dispatch` method returns the `dispatchFeed` for that
+action.
+
+```javascript
+import { Container } from '@3sln/ngin/providers';
+import { Dispatcher } from '@3sln/ngin/actions';
+
+const dispatcher = new Dispatcher({
+  container: new Container({ providers }),
+  interceptors: [loggingInterceptor],
+});
+
+// `engine.dispatch(...)` delegates to exactly this.
+dispatcher.dispatch(new SendEmailAction('user@example.com', 'Hello!'));
+```
 
 ```javascript
 const feed = engine.dispatch(new SendEmailAction('user@example.com', 'Hello!'));

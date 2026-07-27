@@ -4,6 +4,15 @@
   "description": "A lightweight, dependency-injection based state management library.",
   "main": "index.js",
   "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./index.js": "./index.js",
+    "./providers": "./src/providers.js",
+    "./actions": "./src/actions.js",
+    "./queries": "./src/queries.js",
+    "./engine": "./src/engine.js",
+    "./package.json": "./package.json"
+  },
   "author": "Ray Stubbs",
   "repository": {
     "type": "git",
@@ -17,8 +26,12 @@
     "cqrs"
   ],
   "files": [
-    "index.js"
+    "index.js",
+    "src"
   ],
+  "scripts": {
+    "test": "bun test"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },
