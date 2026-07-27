@@ -56,11 +56,28 @@ subscription.unsubscribe();
 
 ## Peeking at Values
 
-You can also use `peek()` to get the current value without subscribing. If the query is active and has emitted at least once, it returns the last emitted value. Otherwise it calls the query's `fetch` method, and throws if the query does not implement one.
+You can also use `peek()` to get the current value without subscribing.
 
 ```javascript
 const time = await query.peek();
 ```
+
+An **active** query -- one with subscribers -- answers the peek itself: you get
+its last emitted value, or, if it has not emitted yet, you wait for its first
+one. An **inactive** query is answered by calling its `fetch` method, and
+`peek()` throws if the query does not implement one.
+
+> A live query that never emits leaves `peek()` pending until it is killed.
+> That is deliberate: `fetch` is not used as a shortcut past a query that is
+> already running, because the two can disagree. If you cannot block, race the
+> peek against a timeout yourself.
+
+## Completion
+
+`complete()` is called on observers that are still attached when a query dies
+-- because the store was disposed, or because `boot` threw. It is **not**
+called on an observer that unsubscribes, the same as RxJS: withdrawing is not
+the query ending. Use it as a signal that the source went away underneath you.
 
 ## Dependencies in Queries
 
@@ -126,6 +143,11 @@ const queries = new QueryStore({ container, dispatcher });
 ```
 
 An `Engine` wires that up for you.
+
+Lifecycle actions are fire-and-forget: nothing waits on their result. If one
+fails, the failure is reported on `console.error` naming the query and the
+action, since there is no caller to propagate it to. To react to one, listen on
+the `bootFeed` your query is given.
 
 ```javascript
 class UserQuery extends Query {

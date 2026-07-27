@@ -111,9 +111,9 @@ await new Promise(resolve => actionFeed.addEventListener('complete', resolve, { 
 
 console.log('--- Query Lifecycle ---');
 // The result of Engine#query is a minimal RxJS-style observable.
-// It also has a 'peek' method to get the current value, which will use the
-// last observed value if the query is active, otherwise it will call
-// the query's 'fetch' method.
+// It also has a 'peek' method to get the current value. An active query
+// answers it from its own last value -- waiting for the first one if it has
+// not emitted yet -- and an inactive query is answered by calling its 'fetch'.
 const queryHandle = engine.query(new MyQuery());
 const subscription = queryHandle.subscribe({
   next: (value) => console.log(`Query received value: ${value}`),

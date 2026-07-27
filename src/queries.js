@@ -47,6 +47,8 @@ class QueryController {
   }
 
   // Resolves true once a value has arrived, false if the query died first.
+  // A live query that never notifies leaves this pending -- that is what makes
+  // peek() on such a query wait rather than fall back to fetch().
   get received() {
     return this.#received.promise;
   }
@@ -57,6 +59,28 @@ class QueryController {
 
   get killFeed() {
     return this.#killFeed;
+  }
+
+  // A lifecycle action is fire-and-forget -- nothing is waiting on its feed, so
+  // a failure would otherwise vanish.  Route it to the same channel as every
+  // other unpropagatable error, with enough context to place it.
+  #dispatchLifecycleAction(action, label) {
+    const feed = this.#store._dispatch(action);
+
+    feed.addEventListener(
+      'error',
+      (event) => {
+        report(
+          new Error(
+            `${this.#query.constructor.name} ${label} (${action.constructor.name}) failed`,
+            { cause: event.error }
+          )
+        );
+      },
+      { once: true }
+    );
+
+    return feed;
   }
 
   notify(nextValue) {
@@ -89,7 +113,10 @@ class QueryController {
     this.#booting = (async () => {
       try {
         if (this.#query.bootAction) {
-          this.#bootFeed = this.#store._dispatch(this.#query.bootAction);
+          this.#bootFeed = this.#dispatchLifecycleAction(
+            this.#query.bootAction,
+            'bootAction'
+          );
         }
 
         this.#lease = await this.#store._container.lease(
@@ -135,7 +162,10 @@ class QueryController {
 
     try {
       if (this.#query.killAction) {
-        this.#killFeed = this.#store._dispatch(this.#query.killAction);
+        this.#killFeed = this.#dispatchLifecycleAction(
+          this.#query.killAction,
+          'killAction'
+        );
       }
       if (this.#query.kill) {
         await this.#query.kill(this.#lease?.resources ?? {}, {
@@ -274,6 +304,9 @@ export class QueryStore {
             }
             closed = true;
 
+            // No complete() for the unsubscriber: withdrawing is not the query
+            // ending.  complete() stays reserved for a query dying underneath
+            // observers that are still attached (see #teardown).
             controller.observers.delete(observer);
             if (controller.observers.size === 0) {
               // Dropped from the registry first, so a subscribe that arrives
@@ -285,6 +318,14 @@ export class QueryStore {
         };
       },
 
+      // Resolves with the active query's current value, waiting for its first
+      // one if it has not emitted yet.  If the query is not active -- or dies
+      // before emitting -- falls through to the query's fetch().
+      //
+      // A live query that never emits therefore leaves this pending until it
+      // is killed.  That is deliberate: peek() on an active query answers from
+      // that query, and a query with subscribers is expected to produce a
+      // value.  Callers that cannot block should race it themselves.
       peek: async () => {
         const controller = this.#controllers.get(queryInstance);
         if (controller && (await controller.received)) {

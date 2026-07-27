@@ -312,6 +312,71 @@ test('bootAction and killAction are routed through the dispatcher', async () => 
   ]);
 });
 
+test('a failing lifecycle action is reported rather than swallowed', async () => {
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const container = new Container();
+    const store = new QueryStore({
+      container,
+      dispatcher: new Dispatcher({ container }),
+    });
+
+    class FailingBootAction extends Action {
+      execute() {
+        throw new Error('the boot action blew up');
+      }
+    }
+
+    const query = new (class DataQuery extends Query {
+      bootAction = new FailingBootAction();
+      boot(_, { notify }) {
+        notify('v');
+      }
+    })();
+
+    store.query(query).subscribe(() => {});
+    await tick(5);
+
+    const reported = errors.mock.calls.map(([err]) => err).find((err) => err?.cause);
+    expect(reported.message).toBe('DataQuery bootAction (FailingBootAction) failed');
+    expect(reported.cause.message).toBe('the boot action blew up');
+  } finally {
+    errors.mockRestore();
+  }
+});
+
+test('peek waits for an active query that has not emitted yet', async () => {
+  const store = new QueryStore();
+  let notify;
+
+  const query = new (class extends Query {
+    boot(_, ctx) {
+      notify = ctx.notify;
+    }
+    async fetch() {
+      return 'fetched';
+    }
+  })();
+
+  const handle = store.query(query);
+  handle.subscribe(() => {});
+  await tick();
+
+  let settled = false;
+  const peeked = handle.peek().then((value) => {
+    settled = true;
+    return value;
+  });
+
+  // Deliberately pending: an active query answers peek from itself, and this
+  // one has not produced a value yet. fetch() must not be used as a shortcut.
+  await tick(5);
+  expect(settled).toBe(false);
+
+  notify('live');
+  expect(await peeked).toBe('live');
+});
+
 test('a lifecycle action without a dispatcher reports a clear error', async () => {
   const errors = spyOn(console, 'error').mockImplementation(() => {});
   try {
