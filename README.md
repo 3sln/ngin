@@ -198,6 +198,37 @@ queries.query(new MyQuery()).subscribe(console.log);
 A `QueryStore` built without a `dispatcher` works fine; it only needs one if a
 query you realize declares a `bootAction` or `killAction`.
 
+#### One-shot queries
+
+A query that implements `fetch` and not `boot` is a **read**: it has one answer
+and no way of learning of a second. Subscribing to one fetches once, emits the
+value, and completes — an ordinary single-value observable, so a consumer can
+subscribe to any query without knowing in advance whether it is live.
+
+```javascript
+class ReadItems extends Query {
+  static deps = ['db'];
+  constructor(collection) { super(); this.collection = collection; }
+  async fetch({ db }) { return db.list(this.collection); }
+}
+
+engine.query(new ReadItems('photos')).subscribe({
+  next: (items) => render(items),
+  complete: () => {},          // immediately after next
+});
+
+await engine.query(new ReadItems('photos')).peek();   // or just this
+```
+
+Three details:
+
+- **Completing evicts it**, so the next subscribe fetches again. Keeping it
+  would serve the first answer forever with nothing able to invalidate it.
+- **Subscribers arriving together share one fetch**, as with any query.
+- **A `fetch` that throws reaches `observer.error`**, so a failed read is not
+  indistinguishable from a successful one that found nothing. Observers with no
+  `error` handler still get `complete`, as before.
+
 ### Composing them yourself
 
 `Engine` accepts pre-built layers, which is how you share a container between

@@ -9,8 +9,11 @@ import { Container } from './providers.js';
 import { report } from './internal.js';
 
 export class Query {
+  // A query that implements `fetch` and not `boot` is a ONE-SHOT: subscribing to
+  // it fetches once, hands the value over, and completes.  See QueryController's
+  // boot() for why that is the fallback rather than an error.
   boot() {
-    throw new Error('boot() not implemented');
+    throw new Error('boot() not implemented, and no fetch() to fall back to');
   }
   kill() {}
 }
@@ -124,15 +127,37 @@ class QueryController {
           this.#query.deps
         );
 
-        await this.#query.boot?.(this.#lease.resources, {
+        const context = {
           notify: this.notify,
           engineFeed: this.#store._container.feed,
           bootFeed: this.#bootFeed,
-        });
+        };
+
+        // A query that never overrode `boot` is a read: it has one answer and no
+        // way to learn of a second.  Rather than failing -- which is what the
+        // base `boot` would do, and it failed QUIETLY, leaving the subscriber
+        // waiting for a value that was never coming -- fetch once, hand the
+        // value over, and complete.  That is an ordinary single-value
+        // observable, so a consumer can subscribe to any query without knowing
+        // in advance whether it is live.
+        if (this.#query.boot === Query.prototype.boot) {
+          if (typeof this.#query.fetch !== 'function') {
+            throw new Error(
+              `${this.#query.constructor.name} implements neither boot() nor fetch()`
+            );
+          }
+          this.notify(await this.#query.fetch(this.#lease.resources, context));
+          // Evicts, completes every observer, and releases the lease -- and
+          // evicting is what makes the NEXT subscribe fetch again rather than
+          // serving a value that has no way of ever being refreshed.
+          await this.#teardown();
+        } else {
+          await this.#query.boot(this.#lease.resources, context);
+        }
       } catch (err) {
         report(err);
         // A query that failed to boot is not a query anyone can wait on.
-        await this.#teardown();
+        await this.#teardown(err);
       } finally {
         this.#booted = true;
       }
@@ -182,7 +207,15 @@ class QueryController {
     }
   }
 
-  async #teardown() {
+  /**
+   * @param {any} [error] when the query is ending BECAUSE something failed.
+   *   Delivered to observers that implement `error`, which matters most for a
+   *   one-shot read: a fetch that threw must not look to its subscriber like an
+   *   empty success.  Observers that do not implement it still get `complete`,
+   *   so nothing that worked before behaves differently, and `report` still runs
+   *   either way so a failure is never simply swallowed.
+   */
+  async #teardown(error) {
     if (this.#dead) {
       return;
     }
@@ -194,7 +227,11 @@ class QueryController {
     this.observers.clear();
     for (const observer of observers) {
       try {
-        observer.complete?.();
+        if (error !== undefined && observer.error) {
+          observer.error(error);
+        } else {
+          observer.complete?.();
+        }
       } catch (err) {
         report(err);
       }
