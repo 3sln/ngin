@@ -290,10 +290,47 @@ export class Dispatcher {
         error = e;
       } finally {
         // Phase 3: Unwind the stack in reverse.
+        //
+        // Every interceptor that entered gets exactly ONE unwind call.  That is
+        // what makes it safe to acquire something in `enter`, so `abort` falls
+        // back to the hook that would have run without it rather than to
+        // nothing -- an interceptor that does not know about aborting must
+        // still be given the chance to close what it opened.
+        //
+        //   aborted   -> abort ?? (error ? error : leave)
+        //   error     -> error ?? nothing
+        //   otherwise -> leave ?? nothing
+        //
+        // Which matters because of what `leave` means to the obvious
+        // interceptor: enter/begin, leave/commit, error/rollback.  Without an
+        // `abort` hook that one commits the work of a dispatch that was
+        // cancelled half way through -- the same lie the feed used to tell by
+        // ending an aborted dispatch on `complete`.
         for (let i = enteredInterceptors.length - 1; i >= 0; i--) {
           const interceptor = enteredInterceptors[i];
+          // Read per iteration: an abort landing mid-unwind is reflected by the
+          // interceptors that have not run yet, rather than being missed.
+          const aborted = dispatchFeed.signal.aborted;
           try {
-            if (error && interceptor.error) {
+            if (aborted && interceptor.abort) {
+              applyState(
+                await container.use(interceptor.deps, (resources) =>
+                  interceptor.abort(resources, {
+                    dispatchFeed,
+                    engineFeed,
+                    signal: dispatchFeed.signal,
+                    action: actionInstance,
+                    state,
+                    reason: dispatchFeed.signal.reason,
+                    // Set when the action threw on its way out -- usually
+                    // because it honoured the signal.  There is no `handled()`
+                    // here: a cancellation cannot be handled into a success,
+                    // because the work did not happen.
+                    error,
+                  })
+                )
+              );
+            } else if (error && interceptor.error) {
               const errorContext = {
                 dispatchFeed,
                 engineFeed,

@@ -161,10 +161,13 @@ test('aborting rejects anything waiting, without waiting for the action', async 
 });
 
 test('the abort reason reaches the action', async () => {
+  // Waits for the signal rather than sleeping a fixed span and hoping the abort
+  // got there first: an unaborted signal's `reason` is undefined, so a race here
+  // reads undefined and fails intermittently under load.
   let reason = null;
   const feed = dispatcherWith().dispatch(
     acting(async (_, { signal }) => {
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      while (!signal.aborted) await new Promise((resolve) => setTimeout(resolve));
       reason = signal.reason;
     })
   );
@@ -299,6 +302,143 @@ test('aborting after it already finished does not rewrite how it ended', async (
   feed.abort(new Error('too late'));
   expect(feed.settled).toBe('complete');
   expect((await feed.next('complete')).type).toBe('complete');
+});
+
+// --- the abort hook on interceptors ----------------------------------------
+
+// The interceptor anyone would write. Without an `abort` hook the dispatcher
+// runs `leave` on a cancelled dispatch, and this commits work that was stopped
+// half way through.
+const transaction = (log, hooks = {}) => ({
+  enter: () => { log.push('begin'); },
+  leave: () => { log.push('commit'); },
+  error: () => { log.push('rollback'); },
+  ...hooks,
+});
+
+const stalls = () =>
+  acting(async (_, { signal }) => {
+    while (!signal.aborted) await new Promise((resolve) => setTimeout(resolve));
+  });
+
+test('abort runs instead of leave, so cancelled work is not committed', async () => {
+  const log = [];
+  const feed = dispatcherWith([
+    transaction(log, { abort: () => { log.push('rollback'); } }),
+  ]).dispatch(stalls());
+  feed.abort(new Error('gave up'));
+  await feed.next('abort');
+  expect(log).toEqual(['begin', 'rollback']);
+});
+
+test('the hook is given the reason', async () => {
+  const why = new Error('client disconnected');
+  let seen = null;
+  const feed = dispatcherWith([{ abort: (_, ctx) => { seen = ctx.reason; } }])
+    .dispatch(stalls());
+  feed.abort(why);
+  await feed.next('abort');
+  expect(seen).toBe(why);
+});
+
+test('the hook is given the error when the action threw on its way out', async () => {
+  // An action that honours the signal by throwing. The abort is the dominant
+  // fact, but an interceptor still needs to know a throw happened.
+  const thrown = new Error('aborted mid-write');
+  let seen;
+  const feed = dispatcherWith([{ abort: (_, ctx) => { seen = ctx.error; } }]).dispatch(
+    acting(async (_, { signal }) => {
+      while (!signal.aborted) await new Promise((resolve) => setTimeout(resolve));
+      throw thrown;
+    })
+  );
+  feed.abort(new Error('gave up'));
+  await feed.next('abort');
+  expect(seen).toBe(thrown);
+});
+
+test('and null when it did not throw', async () => {
+  let seen = 'unset';
+  const feed = dispatcherWith([{ abort: (_, ctx) => { seen = ctx.error; } }])
+    .dispatch(stalls());
+  feed.abort();
+  await feed.next('abort');
+  expect(seen).toBe(null);
+});
+
+test('abort takes precedence over a defined error hook', async () => {
+  const log = [];
+  const feed = dispatcherWith([
+    transaction(log, { abort: () => { log.push('aborted'); } }),
+  ]).dispatch(
+    acting(async (_, { signal }) => {
+      while (!signal.aborted) await new Promise((resolve) => setTimeout(resolve));
+      throw new Error('threw on the way out');
+    })
+  );
+  feed.abort(new Error('gave up'));
+  await feed.next('abort');
+  expect(log).toEqual(['begin', 'aborted']);
+});
+
+// --- the fallback, which is what keeps the old guarantee ---------------------
+
+test('an interceptor with no abort hook still unwinds', async () => {
+  // Every interceptor that entered gets exactly one unwind call. Falling back
+  // to nothing would leave this transaction open forever, which is worse than
+  // committing.
+  const log = [];
+  const feed = dispatcherWith([transaction(log)]).dispatch(stalls());
+  feed.abort();
+  await feed.next('abort');
+  expect(log).toEqual(['begin', 'commit']);
+});
+
+test('an interceptor with no abort hook falls back to error when there was one', async () => {
+  const log = [];
+  const feed = dispatcherWith([transaction(log)]).dispatch(
+    acting(async (_, { signal }) => {
+      while (!signal.aborted) await new Promise((resolve) => setTimeout(resolve));
+      throw new Error('threw on the way out');
+    })
+  );
+  feed.abort();
+  await feed.next('abort');
+  expect(log).toEqual(['begin', 'rollback']);
+});
+
+test('a mixed stack unwinds in reverse, each interceptor exactly once', async () => {
+  const log = [];
+  const feed = dispatcherWith([
+    { enter: () => log.push('enter:outer'), leave: () => log.push('leave:outer') },
+    { enter: () => log.push('enter:inner'), abort: () => log.push('abort:inner') },
+  ]).dispatch(stalls());
+  feed.abort();
+  await feed.next('abort');
+  expect(log).toEqual(['enter:outer', 'enter:inner', 'abort:inner', 'leave:outer']);
+});
+
+test('handled() cannot turn an aborted dispatch into a completed one', async () => {
+  // `handled()` clears the error, which on an ordinary dispatch turns it into a
+  // completion. It must not do that here: the work was cancelled either way.
+  const feed = dispatcherWith([{ error: (_, ctx) => ctx.handled() }]).dispatch(
+    acting(async (_, { signal }) => {
+      while (!signal.aborted) await new Promise((resolve) => setTimeout(resolve));
+      throw new Error('threw on the way out');
+    })
+  );
+  feed.abort(new Error('gave up'));
+  expect((await feed.next('abort')).type).toBe('abort');
+  expect(feed.settled).toBe('abort');
+});
+
+test('an ordinary dispatch never reaches the abort hook', async () => {
+  const log = [];
+  const feed = dispatcherWith([
+    transaction(log, { abort: () => log.push('aborted') }),
+  ]).dispatch(acting(() => {}));
+  await feed.next('complete');
+  expect(log).toEqual(['begin', 'commit']);
 });
 
 // --- the caller's own cancellation -----------------------------------------

@@ -323,6 +323,43 @@ Three details worth knowing:
   the interceptor unwinding with it, and an interceptor that opened something has
   to be given the chance to close it.
 
+### The `abort` interceptor hook
+
+Interceptors unwind through `leave` on success and `error` on failure. An
+aborted dispatch gets a third: `abort`. It matters because of what `leave` means
+to the obvious interceptor —
+
+```javascript
+const transaction = {
+  deps: ['db'],
+  enter: ({ db }) => db.begin(),
+  leave: ({ db }) => db.commit(),
+  error: ({ db }) => db.rollback(),
+  abort: ({ db }) => db.rollback(),   // without this, `leave` commits
+};
+```
+
+— which without an `abort` hook **commits the work of a dispatch that was
+cancelled half way through**, since `error` is null and `leave` is what runs.
+
+The hook receives `reason` (what `abort()` was given) and `error` (what the
+action threw on its way out, usually because it honoured the signal; `null`
+otherwise). There is no `handled()`: a cancellation cannot be handled into a
+success, because the work did not happen.
+
+Every interceptor that entered gets exactly **one** unwind call — that is what
+makes it safe to acquire something in `enter` — so `abort` falls back to the
+hook that would have run without it, never to nothing:
+
+```
+aborted   → abort ?? (error ? error : leave)
+error     → error ?? nothing
+otherwise → leave ?? nothing
+```
+
+An interceptor that has not heard of aborting therefore behaves exactly as it
+does today; defining `abort` is how you opt into the distinction.
+
 -----
 
 ## Provider Options
