@@ -6,6 +6,7 @@
   "type": "module",
   "exports": {
     ".": "./index.js",
+    "./index.js": "./index.js",
     "./providers": "./src/providers.js",
     "./actions": "./src/actions.js",
     "./queries": "./src/queries.js",
