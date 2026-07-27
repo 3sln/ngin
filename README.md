@@ -302,6 +302,12 @@ Cooperative, necessarily: nothing can interrupt a running function, so an action
 that wants to be stoppable checks `signal.aborted`, or hands the signal to
 something that honours it (`fetch`, a scan loop, a nested dispatch).
 
+`feed.reason` is what `abort()` was given — an `AbortError` if it was given
+nothing, never `undefined`, since that value is what `next()` rejects with and a
+caller writing `catch (e) { e.message }` should not have to guard it. The feed
+keeps its own copy rather than reading `signal.reason` back at the point of use;
+that one belongs to the runtime, and Bun 1.3 drops it under memory pressure.
+
 **An aborted dispatch ends on `abort` and never on `complete`.** A scan stopped
 at thirty percent did not complete, and saying it did is how "it worked" gets
 reported about work that did not happen. That holds however the action ended: one

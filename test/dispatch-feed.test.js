@@ -66,14 +66,14 @@ test('rejects with the action\'s own error, not a wrapper', async () => {
   // HTTP statuses can still see what was thrown.
   const boom = Object.assign(new Error('nope'), { status: 418 });
   const feed = dispatcherWith().dispatch(acting(() => { throw boom; }));
-  expect(feed.next('result')).rejects.toBe(boom);
+  await expect(feed.next('result')).rejects.toBe(boom);
 });
 
 test('rejects rather than hanging when the action never emits', async () => {
   // The failure this exists to prevent: a promise with no timeout, no
   // cancellation and no error, waiting on an event that can no longer fire.
   const feed = dispatcherWith().dispatch(acting(() => {}));
-  expect(feed.next('result')).rejects.toThrow(/completed without emitting 'result'/);
+  await expect(feed.next('result')).rejects.toThrow(/completed without emitting 'result'/);
 });
 
 test('naming complete opts back in to receiving it', async () => {
@@ -97,14 +97,14 @@ test('answers a caller that arrives after the dispatch is over', async () => {
   await feed.next('complete');
   expect(feed.settled).toBe('complete');
   // The result event itself is long gone, but the terminal state is not.
-  expect(feed.next('result')).rejects.toThrow(/completed without emitting/);
+  await expect(feed.next('result')).rejects.toThrow(/completed without emitting/);
   expect((await feed.next('complete')).type).toBe('complete');
 });
 
 test('a failed dispatch still rejects a caller that arrives late', async () => {
   const feed = dispatcherWith().dispatch(acting(() => { throw new Error('nope'); }));
   await feed.next(['error']);
-  expect(feed.next('result')).rejects.toThrow('nope');
+  await expect(feed.next('result')).rejects.toThrow('nope');
 });
 
 test('requires at least one event name', () => {
@@ -157,29 +157,46 @@ test('aborting rejects anything waiting, without waiting for the action', async 
   );
   const pending = feed.next('result');
   feed.abort(new Error('client went away'));
-  expect(pending).rejects.toThrow('client went away');
+  await expect(pending).rejects.toThrow('client went away');
 });
 
-test('the abort reason reaches the action', async () => {
-  // Waits for the signal rather than sleeping a fixed span and hoping the abort
-  // got there first: an unaborted signal's `reason` is undefined, so a race here
-  // reads undefined and fails intermittently under load.
-  let reason = null;
+test('the action sees the signal go aborted', async () => {
+  let sawAborted = false;
   const feed = dispatcherWith().dispatch(
     acting(async (_, { signal }) => {
       while (!signal.aborted) await new Promise((resolve) => setTimeout(resolve));
-      reason = signal.reason;
+      sawAborted = true;
     })
   );
   feed.abort(new Error('cancelled by user'));
   await feed.next('abort');
-  expect(reason.message).toBe('cancelled by user');
+  expect(sawAborted).toBe(true);
+});
+
+test('the reason is the feed\'s own, not read back off the signal', async () => {
+  // `signal.reason` belongs to the runtime — Bun 1.3 drops it under memory
+  // pressure, which showed up here as an abort rejecting with `undefined`. Since
+  // that value is what next() rejects with, every caller writing
+  // `catch (e) { e.message }` would break. The feed keeps its own copy.
+  const why = new Error('cancelled by user');
+  const feed = dispatcherWith().dispatch(acting(() => {}));
+  feed.abort(why);
+  expect(feed.reason).toBe(why);
+  expect((await feed.next('abort')).reason).toBe(why);
+  await expect(feed.next('result')).rejects.toBe(why);
+});
+
+test('aborting with no reason still gives an AbortError, never undefined', async () => {
+  const feed = dispatcherWith().dispatch(acting(() => {}));
+  feed.abort();
+  expect(feed.reason.name).toBe('AbortError');
+  await expect(feed.next('result')).rejects.toThrow(/aborted/i);
 });
 
 test('next() called after an abort rejects immediately', async () => {
   const feed = dispatcherWith().dispatch(acting(() => new Promise(() => {})));
   feed.abort(new Error('gone'));
-  expect(feed.next('result')).rejects.toThrow('gone');
+  await expect(feed.next('result')).rejects.toThrow('gone');
 });
 
 test('aborting before the action starts still reaches it', async () => {
@@ -282,14 +299,14 @@ test('waiting for complete on an aborted dispatch rejects rather than hanging', 
   );
   const pending = feed.next(['complete']);
   feed.abort(new Error('gave up'));
-  expect(pending).rejects.toThrow('gave up');
+  await expect(pending).rejects.toThrow('gave up');
 });
 
 test('a late caller on an aborted dispatch is told the reason', async () => {
   const feed = dispatcherWith().dispatch(acting(() => {}));
   feed.abort(new Error('gave up'));
   await feed.next('abort');
-  expect(feed.next('result')).rejects.toThrow('gave up');
+  await expect(feed.next('result')).rejects.toThrow('gave up');
 });
 
 test('aborting after it already finished does not rewrite how it ended', async () => {
@@ -459,7 +476,7 @@ test('a caller signal unblocks the wait without aborting the action', async () =
   const controller = new AbortController();
   const pending = feed.next('result', { signal: controller.signal });
   controller.abort(new Error('client disconnected'));
-  expect(pending).rejects.toThrow('client disconnected');
+  await expect(pending).rejects.toThrow('client disconnected');
 
   await feed.next('complete');
   expect(ranToCompletion).toBe(true);
@@ -470,7 +487,7 @@ test('an already-aborted caller signal rejects without listening', async () => {
   const feed = dispatcherWith().dispatch(acting(() => {}));
   const controller = new AbortController();
   controller.abort(new Error('too late'));
-  expect(feed.next('result', { signal: controller.signal })).rejects.toThrow('too late');
+  await expect(feed.next('result', { signal: controller.signal })).rejects.toThrow('too late');
 });
 
 // --- what did not change ---------------------------------------------------

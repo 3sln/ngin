@@ -36,6 +36,15 @@ class DispatchAbortEvent extends Event {
 // How a dispatch can end.  All three are terminal: exactly one fires, once.
 const TERMINAL = ['complete', 'error', 'abort'];
 
+// What `abort()` uses when given no reason.  The same shape an AbortController
+// picks for itself, so `feed.reason` and `signal.reason` agree; `DOMException`
+// is not a global absolutely everywhere, hence the fallback.
+function abortError() {
+  return typeof DOMException === 'function'
+    ? new DOMException('The dispatch was aborted', 'AbortError')
+    : Object.assign(new Error('The dispatch was aborted'), { name: 'AbortError' });
+}
+
 export class Action {
   execute() {
     throw new Error('execute() not implemented');
@@ -67,6 +76,7 @@ export class Action {
 // without emitting what was awaited would otherwise hang it forever.
 export class DispatchFeed extends EventTarget {
   #controller = new AbortController();
+  #reason; // why this was aborted -- see abort()
   #settled = null; // { type, event } once complete/error has fired
 
   constructor() {
@@ -96,11 +106,28 @@ export class DispatchFeed extends EventTarget {
     return this.#settled?.type ?? null;
   }
 
+  // Why this was aborted, once it has been.  Held here rather than read back off
+  // `signal.reason` at the point of use: that value belongs to the runtime, and
+  // it is what `next()` rejects with, so it must never come back undefined --
+  // rejecting with `undefined` breaks every caller that writes `catch (e) {
+  // e.message }`.  (Bun 1.3 does drop it under memory pressure; even without
+  // that, the guarantee is cheaper to make than to depend on.)
+  get reason() {
+    return this.#reason;
+  }
+
   // Stop caring about this dispatch.  The action decides when to notice --
   // there is no way to interrupt a running function -- but anything waiting on
   // `next()` rejects at once, because the point of aborting is not to wait.
   abort(reason) {
-    this.#controller.abort(reason);
+    if (this.#controller.signal.aborted) {
+      return; // first abort wins, as with AbortController
+    }
+    // Recorded BEFORE aborting.  `abort()` dispatches synchronously, so a
+    // `next()` waiting on the signal rejects during this call -- with the reason
+    // if it is already here, and with undefined if it is not.
+    this.#reason = reason ?? abortError();
+    this.#controller.abort(this.#reason);
   }
 
   /**
@@ -131,7 +158,7 @@ export class DispatchFeed extends EventTarget {
         return;
       }
       if (this.#controller.signal.aborted && !awaitingTheEnd && !this.#settled) {
-        reject(this.#controller.signal.reason);
+        reject(this.#reason);
         return;
       }
       // Already over.  Answer from what was recorded rather than waiting for an
@@ -168,7 +195,7 @@ export class DispatchFeed extends EventTarget {
       if (!awaitingTheEnd) {
         this.#controller.signal.addEventListener(
           'abort',
-          () => settle(reject)(this.#controller.signal.reason),
+          () => settle(reject)(this.#reason),
           options
         );
       }
@@ -321,7 +348,7 @@ export class Dispatcher {
                     signal: dispatchFeed.signal,
                     action: actionInstance,
                     state,
-                    reason: dispatchFeed.signal.reason,
+                    reason: dispatchFeed.reason,
                     // Set when the action threw on its way out -- usually
                     // because it honoured the signal.  There is no `handled()`
                     // here: a cancellation cannot be handled into a success,
@@ -372,7 +399,7 @@ export class Dispatcher {
         // error is carried on the event either way, so nothing is lost.
         if (dispatchFeed.signal.aborted) {
           dispatchFeed.dispatchEvent(
-            new DispatchAbortEvent({ reason: dispatchFeed.signal.reason, error })
+            new DispatchAbortEvent({ reason: dispatchFeed.reason, error })
           );
         } else if (error) {
           dispatchFeed.dispatchEvent(
