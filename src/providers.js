@@ -180,6 +180,77 @@ export class Provider {
     };
   }
 
+  // Creates a provider for a single shared resource that is built lazily, shared
+  // by every consumer at once, and destroyed only when the container is.
+  //
+  // This is the shape a long-lived backbone has -- a database handle, a storage
+  // client, a search index -- and none of the three above fits it.
+  // `fromSingleton` cannot build one, because building is asynchronous and often
+  // ordered (`await db.connect()`).  `fromPool` with a size of one is a MUTEX:
+  // the second `obtain` blocks until the first releases, so one slow consumer
+  // stops every other.  `fromRefCounted` shares correctly but destroys at zero,
+  // so an ordinary lease/release cycle tears the resource down and the next
+  // consumer silently gets a different one while the old is still referenced.
+  //
+  // `release` is a synchronous no-op here, deliberately: a consumer that leases
+  // the backbone on every request should not pay teardown on the way out.
+  static fromLazySingleton(create, destroy, { deps = [] } = {}) {
+    return class LazySingletonProvider extends Provider {
+      static deps = deps;
+
+      #deps;
+      #creation = null;
+      #resource = null;
+      #disposed = false;
+
+      constructor(injectedDeps = {}) {
+        super();
+        this.#deps = injectedDeps;
+      }
+
+      async obtain() {
+        if (this.#disposed) {
+          throw new Error(DISPOSED);
+        }
+
+        // Memoized on the promise rather than the value, so two obtains during a
+        // slow `create` get the same resource instead of racing to build two.
+        this.#creation ??= Promise.resolve().then(() => create(this.#deps));
+
+        try {
+          this.#resource = await this.#creation;
+          return this.#resource;
+        } catch (err) {
+          // A failed creation must not poison every later obtain.
+          this.#creation = null;
+          this.#resource = null;
+          throw err;
+        }
+      }
+
+      // Nothing: the resource outlives whoever borrowed it.
+      release() {}
+
+      async dispose() {
+        if (this.#disposed) {
+          return;
+        }
+        this.#disposed = true;
+
+        if (!this.#creation || typeof destroy !== 'function') {
+          return;
+        }
+
+        // Creation may still be in flight; destroy what it produces rather than
+        // leaking a half-built resource.
+        const resource = this.#resource ?? (await this.#creation.catch(() => null));
+        if (resource != null) {
+          await destroy(resource, this.#deps);
+        }
+      }
+    };
+  }
+
   // Creates a provider for a single shared resource that is lazily created and
   // ref-counted, and destroyed when the count drops to zero.
   static fromRefCounted(create, destroy, { deps = [] } = {}) {
