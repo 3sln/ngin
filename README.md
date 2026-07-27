@@ -8,6 +8,18 @@ you organize your frontend application logic. It uses a dependency injection
 model to coordinate resources, actions, and queries, keeping your code clean
 and testable.
 
+It is built as three independent layers, so you can take only what you need:
+
+| Layer | Import | Exports | Depends on |
+| --- | --- | --- | --- |
+| Dependency injection | `@3sln/ngin/providers` | `Provider`, `Container` | — |
+| Actions | `@3sln/ngin/actions` | `Action`, `Dispatcher` | providers |
+| Queries | `@3sln/ngin/queries` | `Query`, `QueryStore` | providers |
+| Everything | `@3sln/ngin` | all of the above, plus `Engine` | — |
+
+Actions and queries are siblings: neither imports the other. See
+[Layered Usage](#layered-usage).
+
 ## Quick Start
 
 ```javascript
@@ -37,7 +49,7 @@ class DataProvider extends Provider {
   async obtain() {
     const logger = await this.loggerProvider.obtain();
     logger.log('Data connection created.');
-    this.loggerProvider.release();
+    this.loggerProvider.release(logger);
     // The resource is an object with a fetchData method.
     return {
       fetchData: () => 'some data'
@@ -47,7 +59,7 @@ class DataProvider extends Provider {
   async release() {
     const logger = await this.loggerProvider.obtain();
     logger.log('Data connection destroyed.');
-    this.loggerProvider.release();
+    this.loggerProvider.release(logger);
   }
 }
 
@@ -114,6 +126,95 @@ setTimeout(() => {
 
 await engine.dispose();
 ```
+
+-----
+
+## Layered Usage
+
+`Engine` is a facade. It builds a `Container`, a `Dispatcher` and a
+`QueryStore` and wires them together — nothing more. When you only need part of
+that, build the part you need.
+
+### Just dependency injection
+
+```javascript
+import { Container, Provider } from '@3sln/ngin/providers';
+
+const container = new Container({
+  providers: {
+    config: Provider.fromSingleton({ apiUrl: 'https://api.example.com' }),
+    api: Provider.fromRefCounted(
+      ({ config }) => new ApiClient(config.apiUrl),
+      (api) => api.close(),
+      { deps: ['config'] }
+    ),
+  },
+});
+
+// Scoped: obtain, run, release — even if the callback throws.
+const users = await container.use(['api'], ({ api }) => api.getUsers());
+
+// Or hold a lease for work that outlives a single call.
+const lease = await container.lease(['api']);
+lease.resources.api.subscribe(/* ... */);
+await lease.release();
+
+await container.dispose();
+```
+
+### Dependency injection plus actions
+
+```javascript
+import { Container } from '@3sln/ngin/providers';
+import { Action, Dispatcher } from '@3sln/ngin/actions';
+
+const dispatcher = new Dispatcher({
+  container: new Container({ providers }),
+  interceptors: [loggerInterceptor],
+});
+
+dispatcher.dispatch(new MyAction());
+```
+
+### Dependency injection plus queries
+
+```javascript
+import { Container } from '@3sln/ngin/providers';
+import { QueryStore } from '@3sln/ngin/queries';
+
+const queries = new QueryStore({ container: new Container({ providers }) });
+
+queries.query(new MyQuery()).subscribe(console.log);
+```
+
+A `QueryStore` built without a `dispatcher` works fine; it only needs one if a
+query you realize declares a `bootAction` or `killAction`.
+
+### Composing them yourself
+
+`Engine` accepts pre-built layers, which is how you share a container between
+engines or substitute a stub in tests. It also hands them back:
+
+```javascript
+const container = new Container({ providers });
+const engine = new Engine({ container, interceptors });
+
+engine.container;   // the Container above
+engine.dispatcher;  // Dispatcher
+engine.queries;     // QueryStore
+```
+
+### The seam
+
+Everything above the provider layer talks to it through four members and
+nothing else — `feed`, `resolve(depsConfig)`, `lease(...depsConfigs)` and
+`use(depsConfig, fn)` — so anything implementing those can stand in for a
+`Container`.
+
+A **lease** is what lets the two upper layers share one resource model despite
+very different lifetimes: an action holds a lease for a single dispatch, a
+query holds one from `boot` until `kill`. `lease()` obtains every declared
+resource or none of them, and its `release()` is idempotent.
 
 -----
 
@@ -197,3 +298,21 @@ const createResource = async () => new ExpensiveResource();
 const destroyResource = (res) => res.cleanup();
 const myRefCountedProvider = Provider.fromRefCounted(createResource, destroyResource);
 ```
+
+### Dependencies in the built-ins
+
+All three factories take a `deps` option. Those dependencies arrive at
+`create`, `destroy` and `dispose` as **resources** — obtained before the call
+and released after it — not as providers:
+
+```javascript
+const ConnectionProvider = Provider.fromPool(
+  ({ config }) => connect(config.url),      // `config` is the resource
+  (conn, { logger }) => { logger.log('closing'); conn.close(); },
+  { size: 10, deps: ['config', 'logger'] }
+);
+```
+
+Providers you write by hand are the other way around: their constructor
+receives the dependency *providers*, and they manage those lifecycles
+themselves.

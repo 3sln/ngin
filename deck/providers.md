@@ -4,6 +4,13 @@ Providers are responsible for managing the lifecycle of resources. A resource ca
 
 `ngin` provides a base `Provider` class and several static helper methods for common patterns.
 
+This layer stands on its own. If all you want is dependency injection, import
+it directly and skip the rest of the library:
+
+```javascript
+import { Container, Provider } from '@3sln/ngin/providers';
+```
+
 ## The `Provider` Class
 
 Custom providers extend the `Provider` class and implement the `obtain` method. They can optionally implement `release`, `flush`, and `dispose`.
@@ -91,6 +98,41 @@ const closeSocket = (ws) => ws.close();
 
 const SocketProvider = Provider.fromRefCounted(createSocket, closeSocket);
 ```
+
+> The `deps` given to a built-in factory arrive at `create` and `destroy` as
+> *resources*, already obtained and released again around the call. Providers
+> you write by hand receive the dependency *providers* in their constructor
+> instead, and manage those lifecycles themselves.
+
+## The Container
+
+A `Container` instantiates a graph of providers -- each one exactly once, with
+its own dependencies injected -- and hands out their resources.
+
+```javascript
+import { Container, Provider } from '@3sln/ngin/providers';
+
+const container = new Container({
+  providers: {
+    config: ConfigProvider,
+    api: ApiProvider,
+  },
+});
+
+// Scoped: obtain, run, release -- even if the callback throws.
+const users = await container.use(['api'], ({ api }) => api.getUsers());
+
+// Manual, for work that outlives a single call.
+const lease = await container.lease(['api'], { config: { verbose: true } });
+lease.resources.api.subscribe(...);
+await lease.release();   // idempotent
+
+await container.dispose();  // flush, then dispose, dependents first
+```
+
+Constructing a container throws on a missing dependency
+(`Dependency not found: x`) or a cycle
+(`Cyclic dependency detected: a -> b -> a`).
 
 ## Provider Options
 

@@ -29,7 +29,19 @@ class CurrentTimeQuery extends Query {
 
 ## Using Queries
 
-To use a query, you pass an instance to `engine.query()`. This returns an object with a `subscribe` method (compatible with RxJS).
+To use a query, you pass an instance to `engine.query()`, or to a `QueryStore`
+directly if you do not need the rest of the library. This returns an object
+with a `subscribe` method (compatible with RxJS).
+
+```javascript
+import { Container } from '@3sln/ngin/providers';
+import { QueryStore } from '@3sln/ngin/queries';
+
+const queries = new QueryStore({ container: new Container({ providers }) });
+
+// `engine.query(...)` delegates to exactly this.
+queries.query(new CurrentTimeQuery());
+```
 
 ```javascript
 const query = engine.query(new CurrentTimeQuery());
@@ -44,7 +56,7 @@ subscription.unsubscribe();
 
 ## Peeking at Values
 
-You can also use `peek()` to get the current value without subscribing. If the query is active (has subscribers), it returns the last emitted value. If not, it can trigger a fetch (if `fetch` method is implemented).
+You can also use `peek()` to get the current value without subscribing. If the query is active and has emitted at least once, it returns the last emitted value. Otherwise it calls the query's `fetch` method, and throws if the query does not implement one.
 
 ```javascript
 const time = await query.peek();
@@ -70,6 +82,7 @@ class UserQuery extends Query {
     // Maybe set up a socket listener for updates...
   }
 }
+```
 
 ## Query Context
 
@@ -104,6 +117,15 @@ class MouseQuery extends Query {
 ## Lifecycle Actions
 
 Queries can trigger actions automatically when they start (`boot`) or stop (`kill`) by setting the `bootAction` and `killAction` properties.
+
+A `QueryStore` used on its own has nothing to dispatch through, so it needs a
+dispatcher for these:
+
+```javascript
+const queries = new QueryStore({ container, dispatcher });
+```
+
+An `Engine` wires that up for you.
 
 ```javascript
 class UserQuery extends Query {

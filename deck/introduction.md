@@ -4,11 +4,16 @@
 
 ## Core Concepts
 
-*   **Engine**: The central hub that manages dependencies and coordinates actions and queries.
 *   **Provider**: Manages the lifecycle of resources (services, data connections, config).
+*   **Container**: Instantiates a graph of providers and hands out their resources.
 *   **Action**: Encapsulates a discrete unit of work or side effect (e.g., "Login", "FetchData").
-*   **Query**: Encapsulates a reactive data source (e.g., "CurrentUser", "SearchResults").
 *   **Interceptor**: Middleware that wraps actions to add cross-cutting concerns like logging or error handling.
+*   **Query**: Encapsulates a reactive data source (e.g., "CurrentUser", "SearchResults").
+*   **Engine**: A facade that builds a container, a dispatcher and a query store and wires them together.
+
+These are grouped into three independent layers, each with its own entry point,
+so you can use dependency injection on its own, dependency injection plus
+actions, or the whole thing. See [Layers](/layers.md).
 
 ## Installation
 

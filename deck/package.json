@@ -18,6 +18,7 @@
     "title": "Ngin Deck",
     "pinned": [
       "/introduction.md",
+      "/layers.md",
       "/providers.md",
       "/actions.md",
       "/queries.md",
@@ -26,11 +27,21 @@
     "build": {
       "importMap": {
         "imports": {
-          "@3sln/ngin": "/lib/ngin/index.js"
+          "@3sln/ngin": "/lib/ngin/index.js",
+          "@3sln/ngin/providers": "/lib/ngin/src/providers.js",
+          "@3sln/ngin/actions": "/lib/ngin/src/actions.js",
+          "@3sln/ngin/queries": "/lib/ngin/src/queries.js",
+          "@3sln/ngin/engine": "/lib/ngin/src/engine.js"
         }
       },
       "pick": {
-        "../index.js": "lib/ngin/index.js"
+        "../index.js": "lib/ngin/index.js",
+        "../src/index.js": "lib/ngin/src/index.js",
+        "../src/internal.js": "lib/ngin/src/internal.js",
+        "../src/providers.js": "lib/ngin/src/providers.js",
+        "../src/actions.js": "lib/ngin/src/actions.js",
+        "../src/queries.js": "lib/ngin/src/queries.js",
+        "../src/engine.js": "lib/ngin/src/engine.js"
       }
     }
   }
