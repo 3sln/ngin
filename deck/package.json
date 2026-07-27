@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@3sln/ngin": "file:../",
-    "@3sln/deck": "0.0.15"
+    "@3sln/deck": "0.0.16"
   },
   "devDependencies": {
     "vite": "^5.4.20"
