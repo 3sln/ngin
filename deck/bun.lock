@@ -5,7 +5,7 @@
     "": {
       "name": "ngin-deck",
       "dependencies": {
-        "@3sln/deck": "0.0.16",
+        "@3sln/deck": "0.0.17",
         "@3sln/ngin": "file:../",
       },
       "devDependencies": {
@@ -14,7 +14,7 @@
     },
   },
   "packages": {
-    "@3sln/deck": ["@3sln/deck@0.0.16", "", { "dependencies": { "@3sln/dodo": "^0.0.10", "@3sln/ngin": "^0.0.4", "esbuild": "^0.25.0", "fs-extra": "^11.3.2", "glob": "^10.3.10", "highlight.js": "^11.9.0", "marked": "^16.3.0" }, "peerDependencies": { "vite": ">=5" }, "optionalPeers": ["vite"], "bin": { "deck-build": "bin/build.js", "deck-dev": "bin/dev.js" } }, "sha512-PTzzBFMhEtnLELJXTrJW/bsgs5lLYnaNfby5N2cBgrKdJd6tQZ4g/J50SLR/TRHPczqeC5g2oCnBr/oHzK1Ycw=="],
+    "@3sln/deck": ["@3sln/deck@0.0.17", "", { "dependencies": { "@3sln/dodo": "^0.0.10", "@3sln/ngin": "^0.0.4", "esbuild": "^0.25.0", "fs-extra": "^11.3.2", "glob": "^10.3.10", "highlight.js": "^11.9.0", "marked": "^16.3.0" }, "peerDependencies": { "vite": ">=5" }, "optionalPeers": ["vite"], "bin": { "deck-build": "bin/build.js", "deck-dev": "bin/dev.js" } }, "sha512-WKHvL6TKEm+M0lG/DebJOt8UQ33OI7jtOLRnbqp3N1HK6wLTkIPIOD5005oXiTCsxOo/vc5b84nQ6VSfXVMFxQ=="],
 
     "@3sln/dodo": ["@3sln/dodo@0.0.10", "", {}, "sha512-bkZPspzCby0Q1PoRtXAoNcqQFTK0tNEddLxpGC1FaKXXfffUwJfkw1bXxWUxPQEtddlgW7r16c/myhcXnPHURg=="],
 
