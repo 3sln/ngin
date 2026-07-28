@@ -9,13 +9,14 @@
   },
   "dependencies": {
     "@3sln/ngin": "file:../",
-    "@3sln/deck": "0.0.14"
+    "@3sln/deck": "0.0.17"
   },
   "devDependencies": {
     "vite": "^5.4.20"
   },
   "@3sln/deck": {
     "title": "Ngin Deck",
+    "url": "https://ngin.3sln.com",
     "pinned": [
       "/introduction.md",
       "/layers.md",
