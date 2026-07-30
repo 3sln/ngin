@@ -100,8 +100,12 @@ That is equivalent to:
 ```javascript
 const container = new Container({ providers });
 const dispatcher = new Dispatcher({ container, interceptors });
-const queries = new QueryStore({ container, dispatcher });
+const queries = new QueryStore({ container, dispatcher, interceptors });
 ```
+
+Interceptors wrap both layers, which is why the same list goes to both. Built by
+hand they are two separate registrations, so a concern that really does belong
+to only one of them can be given to only one.
 
 You can also hand `Engine` layers you built yourself, which is how you share a
 container between two engines or swap in a stub for tests:

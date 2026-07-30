@@ -39,6 +39,7 @@
         "../index.js": "lib/ngin/index.js",
         "../src/index.js": "lib/ngin/src/index.js",
         "../src/internal.js": "lib/ngin/src/internal.js",
+        "../src/interceptors.js": "lib/ngin/src/interceptors.js",
         "../src/providers.js": "lib/ngin/src/providers.js",
         "../src/actions.js": "lib/ngin/src/actions.js",
         "../src/queries.js": "lib/ngin/src/queries.js",

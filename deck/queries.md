@@ -109,6 +109,20 @@ The `boot` and `kill` methods receive a context object as their second argument 
 *   **`engineFeed`**: The global `EventTarget` for the engine. Useful for listening to global events.
 *   **`bootFeed`**: The `EventTarget` for the `bootAction` (if one was defined).
 *   **`killFeed`**: The `EventTarget` for the `killAction` (available in `kill`).
+*   **`state`**: A shared state object that [interceptors](/interceptors.md) can
+    put things on, the same one an action's `execute` is given.
+
+## Interceptors
+
+Queries are wrapped by the same [interceptors](/interceptors.md) as actions.
+A live query is entered before it boots -- before its `bootAction` is dispatched
+and before its resources are leased -- and left once it has been killed, so an
+access check or a metric covers its whole lifetime. A query answered by `fetch`,
+whether by subscribing to a one-shot or by peeking at an inactive query, is
+entered, fetched and left, exactly like a dispatch.
+
+An interceptor has no say in what a query emits: the values reaching your
+subscribers, and the value `peek()` resolves with, are the query's own.
 
 ## Dynamic `kill` Assignment
 
