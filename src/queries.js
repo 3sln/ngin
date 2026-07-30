@@ -3,9 +3,11 @@
 // Depends on the container seam, and optionally on *anything* with a
 // `dispatch(action)` method for queries that declare a `bootAction` or
 // `killAction`.  It does not import the actions layer, so queries can be used
-// with providers alone.
+// with providers alone -- the interceptor machinery the two layers share is a
+// module of its own for exactly that reason.
 
 import { Container } from './providers.js';
+import { InterceptorStack } from './interceptors.js';
 import { report } from './internal.js';
 
 export class Query {
@@ -19,9 +21,15 @@ export class Query {
 }
 
 // One live realization of a query instance, shared by all of its observers.
+//
+// Interceptors wrap it the way they wrap a dispatch, stretched over its
+// lifetime: `enter` before it boots, `leave` when it dies.  For a live query
+// that is boot until kill; for a one-shot it is the length of the fetch, which
+// is the same shape a dispatch has.
 class QueryController {
   #store;
   #query;
+  #stack;
   #lease = null;
   #booting = null;
   #booted = false;
@@ -39,6 +47,20 @@ class QueryController {
     this.#store = store;
     this.#query = query;
     this.notify = this.notify.bind(this);
+    this.#stack = new InterceptorStack({
+      container: store._container,
+      interceptors: store._interceptors,
+      // Built per hook, so `killFeed` is there for the hooks that run after the
+      // kill action was dispatched and absent for the ones before it.  `notify`
+      // is deliberately not here: an interceptor wraps a query, it does not get
+      // to emit on its behalf.
+      context: () => ({
+        query: this.#query,
+        engineFeed: this.#store._container.feed,
+        bootFeed: this.#bootFeed,
+        killFeed: this.#killFeed,
+      }),
+    });
   }
 
   get hasValue() {
@@ -115,6 +137,16 @@ class QueryController {
 
     this.#booting = (async () => {
       try {
+        // Before anything else happens on the query's behalf.  An interceptor
+        // that refuses one -- an access check -- has to be able to do so before
+        // its boot action is dispatched and its resources are leased.  Which
+        // does put the rest of the boot on a later turn, so a query with no
+        // interceptors skips the await entirely rather than paying for a stack
+        // it does not have.
+        if (!this.#stack.empty) {
+          await this.#stack.enter();
+        }
+
         if (this.#query.bootAction) {
           this.#bootFeed = this.#dispatchLifecycleAction(
             this.#query.bootAction,
@@ -131,6 +163,9 @@ class QueryController {
           notify: this.notify,
           engineFeed: this.#store._container.feed,
           bootFeed: this.#bootFeed,
+          // Whatever the interceptors threaded through, the same as an action's
+          // `execute` gets.
+          state: this.#stack.state,
         };
 
         // A query that never overrode `boot` is a read: it has one answer and no
@@ -198,6 +233,7 @@ class QueryController {
           killFeed: this.#killFeed,
           engineFeed: this.#store._container.feed,
           notify: this.notify,
+          state: this.#stack.state,
         });
       }
     } catch (err) {
@@ -214,6 +250,12 @@ class QueryController {
    *   empty success.  Observers that do not implement it still get `complete`,
    *   so nothing that worked before behaves differently, and `report` still runs
    *   either way so a failure is never simply swallowed.
+   *
+   *   It is also what the interceptors unwind on: `error` for a query that died
+   *   because something failed, `leave` for one that simply ended.  `handled()`
+   *   cannot revive a dead query -- by the time it runs the observers have
+   *   already been told -- so it means only that the interceptors outside the
+   *   one that called it see a query that ended rather than one that broke.
    */
   async #teardown(error) {
     if (this.#dead) {
@@ -246,6 +288,19 @@ class QueryController {
     if (lease) {
       await lease.release();
     }
+
+    // Last, after the query has let go of everything, the way `leave` runs
+    // after an action's lease is released.  Teardown is where every ending
+    // meets -- killed, completed after a one-shot fetch, or dead because boot
+    // threw -- and it runs once, so this is the query's only unwind.
+    if (!this.#stack.empty) {
+      const failure = await this.#stack.unwind(error);
+      // What brought the query down has already been reported by whoever caught
+      // it; what an unwinding hook threw on top of it has not.
+      if (failure && failure !== error) {
+        report(failure);
+      }
+    }
   }
 }
 
@@ -253,12 +308,16 @@ class QueryController {
 export class QueryStore {
   #container;
   #dispatcher;
+  #interceptors;
   #controllers;
   #disposed = false;
 
-  constructor({ container, dispatcher, createControllerMap } = {}) {
+  constructor({ container, dispatcher, interceptors, createControllerMap } = {}) {
     this.#container = container ?? new Container();
     this.#dispatcher = dispatcher ?? null;
+    // Copied here rather than per query, same as the dispatcher: the list is
+    // fixed at construction, and mutating it afterwards has no effect.
+    this.#interceptors = interceptors ? [...interceptors] : [];
     this.#controllers = createControllerMap?.() ?? new Map();
   }
 
@@ -273,6 +332,10 @@ export class QueryStore {
   // Internal seams used by QueryController.
   get _container() {
     return this.#container;
+  }
+
+  get _interceptors() {
+    return this.#interceptors;
   }
 
   _dispatch(action) {
@@ -375,16 +438,34 @@ export class QueryStore {
           );
         }
 
-        const lease = await this.#container.lease(...this.#queryDeps(queryInstance));
-        try {
-          return await queryInstance.fetch(lease.resources, {
+        // A peek that fetches is a use of the query in its own right, so it is
+        // wrapped like one: enter, fetch, leave -- the shape a dispatch has.
+        // The value comes back untouched; interceptors wrap the work, they have
+        // no say in its result.
+        const stack = new InterceptorStack({
+          container: this.#container,
+          interceptors: this.#interceptors,
+          context: () => ({
+            query: queryInstance,
             engineFeed: this.#container.feed,
             bootFeed: controller?.bootFeed,
             killFeed: controller?.killFeed,
-          });
-        } finally {
-          await lease.release();
-        }
+          }),
+        });
+
+        return await stack.run(async (state) => {
+          const lease = await this.#container.lease(...this.#queryDeps(queryInstance));
+          try {
+            return await queryInstance.fetch(lease.resources, {
+              engineFeed: this.#container.feed,
+              bootFeed: controller?.bootFeed,
+              killFeed: controller?.killFeed,
+              state,
+            });
+          } finally {
+            await lease.release();
+          }
+        });
       },
     };
   }

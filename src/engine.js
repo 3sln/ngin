@@ -19,11 +19,15 @@ export class Engine {
     this.#container = container ?? new Container({ providers });
     this.#dispatcher =
       dispatcher ?? new Dispatcher({ container: this.#container, interceptors });
+    // The same interceptors wrap both: one list, one registration, and the
+    // context names which kind of work a hook was called for (`action` or
+    // `query`) for the interceptors that care about the difference.
     this.#queries =
       queries ??
       new QueryStore({
         container: this.#container,
         dispatcher: this.#dispatcher,
+        interceptors,
         createControllerMap: hooks?.createQueryControllersMap,
       });
   }

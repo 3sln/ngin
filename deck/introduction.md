@@ -7,7 +7,7 @@
 *   **Provider**: Manages the lifecycle of resources (services, data connections, config).
 *   **Container**: Instantiates a graph of providers and hands out their resources.
 *   **Action**: Encapsulates a discrete unit of work or side effect (e.g., "Login", "FetchData").
-*   **Interceptor**: Middleware that wraps actions to add cross-cutting concerns like logging or error handling.
+*   **Interceptor**: Middleware that wraps actions *and* queries to add cross-cutting concerns like access checks, metrics, usage tracking, logging or error handling.
 *   **Query**: Encapsulates a reactive data source (e.g., "CurrentUser", "SearchResults").
 *   **Engine**: A facade that builds a container, a dispatcher and a query store and wires them together.
 

@@ -1,9 +1,11 @@
-// Layer 2: actions and interceptors.
+// Layer 2: actions.
 //
 // Depends only on the container seam (`feed`, `resolve`, `lease`, `use`), so it
-// can be used with providers but without queries.
+// can be used with providers but without queries.  The interceptor machinery is
+// shared with the query layer and lives in its own module.
 
 import { Container } from './providers.js';
+import { InterceptorStack } from './interceptors.js';
 
 // `ErrorEvent` is not a global everywhere JavaScript runs, so fall back to an
 // equivalent shape.  Listeners read `event.error` either way.
@@ -262,152 +264,62 @@ export class Dispatcher {
     const dispatchFeed = new DispatchFeed();
 
     setTimeout(async () => {
-      const enteredInterceptors = [];
-      let state = {};
+      const stack = new InterceptorStack({
+        container,
+        interceptors,
+        // `action` is the key that tells an interceptor which of the two kinds
+        // of work it is wrapping; a query puts `query` here instead.
+        context: () => ({
+          dispatchFeed,
+          engineFeed,
+          signal: dispatchFeed.signal,
+          action: actionInstance,
+        }),
+        aborted: () =>
+          dispatchFeed.signal.aborted ? { reason: dispatchFeed.reason } : null,
+      });
+
       let error = null;
-
-      const applyState = (nextState) => {
-        if (nextState !== undefined) {
-          state = nextState;
-        }
-      };
-
       try {
-        // Phase 1: Run 'enter' interceptors.
-        for (const interceptor of interceptors) {
-          // Recorded before running so a failing 'enter' still gets unwound.
-          enteredInterceptors.push(interceptor);
-          if (!interceptor.enter) {
-            continue;
-          }
-
-          applyState(
-            await container.use(interceptor.deps, (resources) =>
-              interceptor.enter(resources, {
-                dispatchFeed,
-                engineFeed,
-                signal: dispatchFeed.signal,
-                state,
-                action: actionInstance,
-              })
-            )
+        await stack.run(async (state) => {
+          // Instance deps override static ones of the same name.
+          const lease = await container.lease(
+            actionInstance.constructor.deps,
+            actionInstance.deps
           );
-        }
-
-        // Phase 2: Obtain and execute the main action.  Instance deps override
-        // static ones of the same name.
-        const lease = await container.lease(
-          actionInstance.constructor.deps,
-          actionInstance.deps
-        );
-        try {
-          await actionInstance.execute(lease.resources, {
-            dispatchFeed,
-            engineFeed,
-            // Cooperative: aborting cannot interrupt a running function, so an
-            // action that wants to be stoppable checks this, or hands it to
-            // something that does (fetch, a scan loop, another dispatch).
-            signal: dispatchFeed.signal,
-            state,
-          });
-        } finally {
-          await lease.release();
-        }
+          try {
+            await actionInstance.execute(lease.resources, {
+              dispatchFeed,
+              engineFeed,
+              // Cooperative: aborting cannot interrupt a running function, so an
+              // action that wants to be stoppable checks this, or hands it to
+              // something that does (fetch, a scan loop, another dispatch).
+              signal: dispatchFeed.signal,
+              state,
+            });
+          } finally {
+            await lease.release();
+          }
+        });
       } catch (e) {
         error = e;
-      } finally {
-        // Phase 3: Unwind the stack in reverse.
-        //
-        // Every interceptor that entered gets exactly ONE unwind call.  That is
-        // what makes it safe to acquire something in `enter`, so `abort` falls
-        // back to the hook that would have run without it rather than to
-        // nothing -- an interceptor that does not know about aborting must
-        // still be given the chance to close what it opened.
-        //
-        //   aborted   -> abort ?? (error ? error : leave)
-        //   error     -> error ?? nothing
-        //   otherwise -> leave ?? nothing
-        //
-        // Which matters because of what `leave` means to the obvious
-        // interceptor: enter/begin, leave/commit, error/rollback.  Without an
-        // `abort` hook that one commits the work of a dispatch that was
-        // cancelled half way through -- the same lie the feed used to tell by
-        // ending an aborted dispatch on `complete`.
-        for (let i = enteredInterceptors.length - 1; i >= 0; i--) {
-          const interceptor = enteredInterceptors[i];
-          // Read per iteration: an abort landing mid-unwind is reflected by the
-          // interceptors that have not run yet, rather than being missed.
-          const aborted = dispatchFeed.signal.aborted;
-          try {
-            if (aborted && interceptor.abort) {
-              applyState(
-                await container.use(interceptor.deps, (resources) =>
-                  interceptor.abort(resources, {
-                    dispatchFeed,
-                    engineFeed,
-                    signal: dispatchFeed.signal,
-                    action: actionInstance,
-                    state,
-                    reason: dispatchFeed.reason,
-                    // Set when the action threw on its way out -- usually
-                    // because it honoured the signal.  There is no `handled()`
-                    // here: a cancellation cannot be handled into a success,
-                    // because the work did not happen.
-                    error,
-                  })
-                )
-              );
-            } else if (error && interceptor.error) {
-              const errorContext = {
-                dispatchFeed,
-                engineFeed,
-                signal: dispatchFeed.signal,
-                action: actionInstance,
-                state,
-                error,
-                handled: () => {
-                  error = null;
-                },
-              };
-              applyState(
-                await container.use(interceptor.deps, (resources) =>
-                  interceptor.error(resources, errorContext)
-                )
-              );
-            } else if (!error && interceptor.leave) {
-              applyState(
-                await container.use(interceptor.deps, (resources) =>
-                  interceptor.leave(resources, {
-                    dispatchFeed,
-                    engineFeed,
-                    signal: dispatchFeed.signal,
-                    state,
-                    action: actionInstance,
-                  })
-                )
-              );
-            }
-          } catch (e) {
-            error = e;
-          }
-        }
+      }
 
-        // An aborted dispatch ends on `abort`, whatever the action did on its
-        // way out. It did not complete -- it was stopped -- and an action that
-        // threw because it honoured the signal threw *because* of the abort, so
-        // reporting the throw would name the symptom rather than the cause. The
-        // error is carried on the event either way, so nothing is lost.
-        if (dispatchFeed.signal.aborted) {
-          dispatchFeed.dispatchEvent(
-            new DispatchAbortEvent({ reason: dispatchFeed.reason, error })
-          );
-        } else if (error) {
-          dispatchFeed.dispatchEvent(
-            new DispatchErrorEvent('error', { error, message: messageOf(error) })
-          );
-        } else {
-          dispatchFeed.dispatchEvent(new Event('complete'));
-        }
+      // An aborted dispatch ends on `abort`, whatever the action did on its way
+      // out. It did not complete -- it was stopped -- and an action that threw
+      // because it honoured the signal threw *because* of the abort, so
+      // reporting the throw would name the symptom rather than the cause. The
+      // error is carried on the event either way, so nothing is lost.
+      if (dispatchFeed.signal.aborted) {
+        dispatchFeed.dispatchEvent(
+          new DispatchAbortEvent({ reason: dispatchFeed.reason, error })
+        );
+      } else if (error) {
+        dispatchFeed.dispatchEvent(
+          new DispatchErrorEvent('error', { error, message: messageOf(error) })
+        );
+      } else {
+        dispatchFeed.dispatchEvent(new Event('complete'));
       }
     });
 

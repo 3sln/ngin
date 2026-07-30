@@ -65,13 +65,16 @@ class DataProvider extends Provider {
 
 // An interceptor that uses the logger. Interceptors, actions, and queries
 // all get the actual resource injected.
+//
+// One interceptor wraps both: the context carries `action` for a dispatch and
+// `query` for a query, so a hook can tell them apart when it cares.
 const loggerInterceptor = {
   deps: ['logger'],
-  enter: ({ logger }, { action }) => {
-    logger.log(`Entering action: ${action.constructor.name}`);
+  enter: ({ logger }, { action, query }) => {
+    logger.log(`Entering: ${(action ?? query).constructor.name}`);
   },
-  leave: ({ logger }, { action }) => {
-    logger.log(`Leaving action: ${action.constructor.name}`);
+  leave: ({ logger }, { action, query }) => {
+    logger.log(`Leaving: ${(action ?? query).constructor.name}`);
   },
 };
 
@@ -190,7 +193,10 @@ dispatcher.dispatch(new MyAction());
 import { Container } from '@3sln/ngin/providers';
 import { QueryStore } from '@3sln/ngin/queries';
 
-const queries = new QueryStore({ container: new Container({ providers }) });
+const queries = new QueryStore({
+  container: new Container({ providers }),
+  interceptors: [loggerInterceptor],
+});
 
 queries.query(new MyQuery()).subscribe(console.log);
 ```
@@ -396,6 +402,87 @@ otherwise → leave ?? nothing
 
 An interceptor that has not heard of aborting therefore behaves exactly as it
 does today; defining `abort` is how you opt into the distinction.
+
+-----
+
+## Interceptors Wrap Queries Too
+
+An interceptor wraps *work*, and a query is work. The same list covers both
+layers, so a concern that belongs to your application rather than to one kind
+of call — an access check, a metric, a usage record, a log — is registered once:
+
+```javascript
+const engine = new Engine({ providers, interceptors: [usage] });
+// or, by hand:
+const dispatcher = new Dispatcher({ container, interceptors: [usage] });
+const queries = new QueryStore({ container, dispatcher, interceptors: [usage] });
+```
+
+### Which one am I wrapping?
+
+The context says so by name. `action` is there for a dispatch, `query` for a
+query, and never both:
+
+| Key | Present for | Alongside |
+| --- | --- | --- |
+| `action` | a dispatch | `dispatchFeed`, `signal` |
+| `query` | a query | `bootFeed`, `killFeed` |
+
+`engineFeed` and `state` are on both, and `state` reaches the work itself: an
+action's `execute`, a query's `boot`, `fetch` and `kill` all receive what the
+`enter` hooks threaded through.
+
+```javascript
+const usage = {
+  deps: ['metrics'],
+  enter: ({ metrics }, { action, query }) => {
+    metrics.increment(action ? 'action' : 'query', (action ?? query).constructor.name);
+  },
+};
+```
+
+### Enter on boot, leave on tear down
+
+A live query is entered **before it boots** — before its `bootAction` is
+dispatched and before its resources are leased, so an access check can refuse it
+before anything happens on its behalf — and left once the last observer has
+unsubscribed, the query has been killed and its lease released. `enter` and
+`leave` can therefore be minutes apart, which is exactly what makes them useful
+for a permit, a span, or a subscription count.
+
+A query answered by `fetch` is the shape a dispatch is:
+
+```
+subscribe to a live query   enter, boot ... kill, leave
+subscribe to a one-shot     enter, fetch, leave
+peek() an inactive query    enter, fetch, leave
+peek() an active query      nothing — it was entered when it booted
+```
+
+Two consequences, which matter most to anything counting:
+
+- **A query is entered once per realization, not once per subscriber.** The
+  second observer of a query that is already running joins the live one; there
+  is no second `enter`, and `leave` runs when the *last* of them unsubscribes.
+- **A `bootAction` or `killAction` is a dispatch in its own right**, so it runs
+  the stack again with `action` set, nested inside the query's.
+
+The `abort` hook is a dispatch's alone: a query has no caller to give up on it,
+so it ends through `leave` or `error` and never through `abort`.
+
+### They have no say in the result
+
+Values reaching your subscribers, and the value `peek()` resolves with, are the
+query's own whatever the hooks return. A hook's return value goes to `state`
+and nowhere else.
+
+Failure works as it does for a dispatch — `error` hooks in reverse order, one
+unwind call per interceptor that entered — with one difference worth stating:
+`handled()` cannot bring a query back. By the time the stack unwinds, a query
+that failed has already told its observers and released its lease, so handling
+its error only means the interceptors outside see a query that ended rather than
+one that broke. A query that fails to boot is unwound there and then, so being
+killed afterwards does not unwind it twice.
 
 -----
 
