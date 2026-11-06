@@ -14,7 +14,7 @@ export class Engine {
   #disposed = false;
   #disposal = null;
 
-  constructor({ providers, interceptors, hooks, container, dispatcher, queries } = {}) {
+  constructor({ providers, interceptors, hooks, container, dispatcher, queries, pending } = {}) {
     // Each layer can be supplied pre-built, which is how you swap one out
     // (a stub container in tests, a dispatcher shared with another engine).
     this.#container = container ?? new Container({ providers });
@@ -29,6 +29,7 @@ export class Engine {
         container: this.#container,
         dispatcher: this.#dispatcher,
         interceptors,
+        pending,
         createControllerMap: hooks?.createQueryControllersMap,
       });
   }
@@ -57,7 +58,7 @@ export class Engine {
     return this.#dispatcher.dispatch(actionInstance);
   }
 
-  // Realizes a query.
+  // Realizes a query as a Cell (with deprecated subscribe/peek compatibility).
   query(queryInstance) {
     if (this.#disposed) {
       throw new Error('The engine has been disposed');

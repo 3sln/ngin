@@ -14,7 +14,7 @@ It is built as three independent layers, so you can take only what you need:
 | --- | --- | --- | --- |
 | Dependency injection | `@3sln/ngin/providers` | `Provider`, `Container` | — |
 | Actions | `@3sln/ngin/actions` | `Action`, `Dispatcher`, `DispatchFeed` | providers |
-| Queries | `@3sln/ngin/queries` | `Query`, `QueryStore` | providers |
+| Queries | `@3sln/ngin/queries` | `Query`, `QueryStore`, `PENDING` | providers |
 | Everything | `@3sln/ngin` | all of the above, plus `Engine` | — |
 
 Actions and queries are siblings: neither imports the other. See
@@ -23,7 +23,7 @@ Actions and queries are siblings: neither imports the other. See
 ## Quick Start
 
 ```javascript
-import { Engine, Action, Query, Provider } from 'ngin';
+import { Engine, Action, Query, Provider, PENDING } from '@3sln/ngin';
 
 // Set up a LoggerProvider. It's a dependency for other stuff.
 class LoggerProvider extends Provider {
@@ -114,19 +114,16 @@ const actionFeed = engine.dispatch(new MyAction());
 await actionFeed.next('complete');
 
 console.log('--- Query Lifecycle ---');
-// The result of Engine#query is a minimal RxJS-style observable.
-// It also has a 'peek' method to get the current value. An active query
-// answers it from its own last value -- waiting for the first one if it has
-// not emitted yet -- and an inactive query is answered by calling its 'fetch'.
-const queryHandle = engine.query(new MyQuery());
-const subscription = queryHandle.subscribe({
-  next: (value) => console.log(`Query received value: ${value}`),
-});
+// Queries expose Cells: subscribe to invalidation, then pull the latest value.
+const queryCell = engine.query(new MyQuery());
+const renderQuery = () => {
+  const value = queryCell.getValue();
+  if (value !== PENDING) console.log(`Query received value: ${value}`);
+};
+const stop = queryCell.onDirty(renderQuery);
+renderQuery();
 
-setTimeout(() => {
-  console.log('Unsubscribing from query...');
-  subscription.unsubscribe();
-}, 100);
+setTimeout(stop, 100);
 
 await engine.dispose();
 ```
@@ -191,18 +188,70 @@ dispatcher.dispatch(new MyAction());
 
 ```javascript
 import { Container } from '@3sln/ngin/providers';
-import { QueryStore } from '@3sln/ngin/queries';
+import { QueryStore, PENDING } from '@3sln/ngin/queries';
 
 const queries = new QueryStore({
   container: new Container({ providers }),
   interceptors: [loggerInterceptor],
 });
 
-queries.query(new MyQuery()).subscribe(console.log);
+const result = queries.query(new MyQuery());
+const read = () => {
+  const value = result.getValue();
+  if (value !== PENDING) console.log(value);
+};
+const stop = result.onDirty(read);
+read();
+// Call stop() when the consumer goes away.
 ```
 
 A `QueryStore` built without a `dispatcher` works fine; it only needs one if a
 query you realize declares a `bootAction` or `killAction`.
+
+#### Query Cells
+
+`engine.query(instance)` and `queries.query(instance)` return a Cell with two
+methods: `onDirty(listener)` registers an invalidation callback and returns an
+idempotent unsubscribe function; `getValue()` synchronously reads the current
+value. A dirty callback receives no arguments: pull the value when you need it,
+so consumers can coalesce several invalidations into one read.
+
+The first dirty listener boots the query, and the last unsubscribe kills it.
+Legacy subscribers count toward the same lifetime. `getValue()` never starts a
+query, leases resources, or calls `fetch()`. Before a value arrives it returns
+the exported `PENDING` symbol; an emitted `undefined` is an ordinary value.
+Failures notify listeners and throw from `getValue()`. Catch errors at the
+consumer's read boundary. Disconnected Cells retain their last observed value
+or failure. Reconnecting after the realization ends starts with pending state
+and retries the query; an already active realization supplies its current state.
+
+Repeated calls with the same query instance return the same Cell. A Cell can
+also read an equivalent query's active value through the dedup hooks below.
+
+Cells compose directly with dodo's reactive helpers. Because dodo uses its own
+pending symbol, configure that exact sentinel when constructing the engine or
+store. ngin has no dependency on dodo:
+
+```js
+import { Engine } from '@3sln/ngin';
+import { PENDING, derive, effect } from '@3sln/dodo/reactive';
+
+const engine = new Engine({ providers, pending: PENDING });
+const items = engine.query(new ReadItems('photos'));
+const count = derive([items], (values) => values.length);
+const stop = effect(count, (value) => console.log(`${value} items`));
+// count also works as the source for dodo's watch(count, renderCount).
+```
+
+`new QueryStore({ pending: PENDING })` supports the same configuration. When
+supplying a prebuilt store to `Engine`, configure the sentinel on that store.
+
+The previous `subscribe(observerOrNext)` and asynchronous `peek()` methods
+remain on the Cell for backward compatibility and are deprecated. Legacy
+`subscribe` preserves `next`, `error`, `complete`, and `{unsubscribe, closed}`;
+`peek()` still waits for an active query's first value or calls `fetch()` when
+inactive. Their behavior is unchanged; migrate reactive consumers to
+`onDirty`/`getValue` as convenient.
 
 #### Sharing equivalent query instances
 
@@ -251,9 +300,9 @@ realization merely because their keys or arguments match.
 #### One-shot queries
 
 A query that implements `fetch` and not `boot` is a **read**: it has one answer
-and no way of learning of a second. Subscribing to one fetches once, emits the
-value, and completes — an ordinary single-value observable, so a consumer can
-subscribe to any query without knowing in advance whether it is live.
+and no way of learning of a second. Its first Cell listener starts one fetch.
+The Cell retains the result after the query releases its resources. Removing
+all listeners and reconnecting fetches again.
 
 ```javascript
 class ReadItems extends Query {
@@ -262,22 +311,20 @@ class ReadItems extends Query {
   async fetch({ db }) { return db.list(this.collection); }
 }
 
-engine.query(new ReadItems('photos')).subscribe({
-  next: (items) => render(items),
-  complete: () => {},          // immediately after next
-});
-
-await engine.query(new ReadItems('photos')).peek();   // or just this
+const items = engine.query(new ReadItems('photos'));
+const renderItems = () => {
+  const value = items.getValue();
+  if (value !== PENDING) render(value);
+};
+const stop = items.onDirty(renderItems);
+renderItems();
 ```
 
-Three details:
-
-- **Completing evicts it**, so the next subscribe fetches again. Keeping it
-  would serve the first answer forever with nothing able to invalidate it.
-- **Subscribers arriving together share one fetch**, as with any query.
-- **A `fetch` that throws reaches `observer.error`**, so a failed read is not
-  indistinguishable from a successful one that found nothing. Observers with no
-  `error` handler still get `complete`, as before.
+Concurrent consumers share one fetch. Completion evicts the realization so a
+later connection can refresh, while existing Cells keep the result. A failed
+fetch throws from the Cell's `getValue()` and can be retried by disconnecting
+all its listeners and reconnecting. Legacy subscribers still receive one
+`next` followed by `complete`, or `error` when the fetch fails.
 
 ### Composing them yourself
 

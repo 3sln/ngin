@@ -10,6 +10,82 @@ import { Container } from './providers.js';
 import { InterceptorStack } from './interceptors.js';
 import { report } from './internal.js';
 
+// Consumers may configure another protocol's sentinel (for example dodo's).
+export const PENDING = Symbol('ngin.query.PENDING');
+
+// The Cell owns one upstream observer regardless of its listener count. Legacy
+// observers still use that same controller through subscribe(). Reads never
+// connect or fetch: only the first dirty listener starts a realization.
+function asCell(handle, pending, readActive, assertAvailable) {
+  const listeners = new Set();
+  let subscription = null;
+  let value = pending;
+  let failed = false;
+  let failure;
+
+  const notify = () => {
+    for (const { listener } of [...listeners]) {
+      try {
+        listener();
+      } catch (err) {
+        report(err);
+      }
+    }
+  };
+
+  return Object.assign(handle, {
+    onDirty(listener) {
+      assertAvailable();
+      if (typeof listener !== 'function') {
+        throw new TypeError('onDirty() requires a function');
+      }
+      // Each registration counts independently, including duplicate callbacks.
+      const registration = { listener };
+      listeners.add(registration);
+      if (listeners.size === 1) {
+        value = pending;
+        failed = false;
+        failure = undefined;
+        try {
+          subscription = handle.subscribe({
+            next(nextValue) {
+              value = nextValue;
+              failed = false;
+              failure = undefined;
+              notify();
+            },
+            error(error) {
+              failed = true;
+              failure = error;
+              notify();
+            },
+          });
+        } catch (err) {
+          listeners.delete(registration);
+          throw err;
+        }
+      }
+      let removed = false;
+      return () => {
+        if (removed) return;
+        removed = true;
+        listeners.delete(registration);
+        if (listeners.size === 0 && subscription) {
+          const previous = subscription;
+          subscription = null;
+          previous.unsubscribe();
+        }
+      };
+    },
+    getValue() {
+      const active = readActive();
+      if (active) return active.hasValue ? active.currentValue : pending;
+      if (failed) throw failure;
+      return value;
+    },
+  });
+}
+
 export class Query {
   // A query that implements `fetch` and not `boot` is a ONE-SHOT: subscribing to
   // it fetches once, hands the value over, and completes.  See QueryController's
@@ -258,6 +334,7 @@ class QueryController {
    *   one that called it see a query that ended rather than one that broke.
    */
   async #teardown(error) {
+    const failed = arguments.length > 0;
     if (this.#dead) {
       return;
     }
@@ -269,7 +346,7 @@ class QueryController {
     this.observers.clear();
     for (const observer of observers) {
       try {
-        if (error !== undefined && observer.error) {
+        if (failed && observer.error) {
           observer.error(error);
         } else {
           observer.complete?.();
@@ -312,11 +389,14 @@ export class QueryStore {
   #controllers;
   #dedupKeys = new Map();
   #controllerKeys = new WeakMap();
+  #cells = new WeakMap();
+  #pending;
   #disposed = false;
 
-  constructor({ container, dispatcher, interceptors, createControllerMap } = {}) {
+  constructor({ container, dispatcher, interceptors, createControllerMap, pending = PENDING } = {}) {
     this.#container = container ?? new Container();
     this.#dispatcher = dispatcher ?? null;
+    this.#pending = pending;
     // Copied here rather than per query, same as the dispatcher: the list is
     // fixed at construction, and mutating it afterwards has no effect.
     this.#interceptors = interceptors ? [...interceptors] : [];
@@ -414,15 +494,18 @@ export class QueryStore {
     return [queryInstance.constructor.deps, queryInstance.deps];
   }
 
-  // Realizes a query.  Call `subscribe` on the returned object to use it as an
-  // RxJS style observable, or `peek` to get a look at the current value if the
-  // query is active, or fetch it otherwise.
+  // Realizes a query as a Cell: onDirty() connects, getValue() reads synchronously.
+  // subscribe()/peek() remain available as deprecated compatibility methods.
   query(queryInstance) {
     if (!(queryInstance instanceof Query)) {
       throw new TypeError('query() requires an instance of Query');
     }
 
-    return {
+    const existing = this.#cells.get(queryInstance);
+    if (existing) return existing;
+
+    const handle = {
+      /** @deprecated Use onDirty() and getValue() instead. */
       subscribe: (observerOrNext) => {
         if (this.#disposed) {
           throw new Error('The query store has been disposed');
@@ -485,6 +568,7 @@ export class QueryStore {
       // is killed.  That is deliberate: peek() on an active query answers from
       // that query, and a query with subscribers is expected to produce a
       // value.  Callers that cannot block should race it themselves.
+      /** @deprecated Async fetch/current-value compatibility API. */
       peek: async () => {
         const controller = this.#controller(queryInstance);
         if (controller && (await controller.received)) {
@@ -527,6 +611,16 @@ export class QueryStore {
         });
       },
     };
+    const cell = asCell(
+      handle,
+      this.#pending,
+      () => this.#controller(queryInstance),
+      () => {
+        if (this.#disposed) throw new Error('The query store has been disposed');
+      }
+    );
+    this.#cells.set(queryInstance, cell);
+    return cell;
   }
 
   // Kills every live query.  Idempotent.
