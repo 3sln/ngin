@@ -204,6 +204,50 @@ queries.query(new MyQuery()).subscribe(console.log);
 A `QueryStore` built without a `dispatcher` works fine; it only needs one if a
 query you realize declares a `bootAction` or `killAction`.
 
+#### Sharing equivalent query instances
+
+By default, subscriptions share a live query only when they use the same query
+instance. Implement `dedupEquiv(otherQuery)` to share equivalent instances of the
+same query class, including queries whose arguments are distinct objects:
+
+```js
+class UserQuery extends Query {
+  constructor(filter) {
+    super();
+    this.filter = filter;
+  }
+
+  dedupEquiv(other) {
+    return this.filter.teamId === other.filter.teamId &&
+      this.filter.userId === other.filter.userId;
+  }
+
+  // Optional: only compare candidates in the same team bucket.
+  dedupKey() { return this.filter.teamId; }
+
+  // boot(), kill(), and dependencies as usual
+}
+```
+
+Without `dedupKey()`, equality checks scan active realizations of the same query
+constructor. An optional `dedupKey()` narrows that search to a bucket, using
+JavaScript `Map` equality for the bucket keys. Colliding keys still use `dedupEquiv`
+to decide sharing. Equal queries must return the same bucket key; use a stable
+primitive key or a shared object identity. `undefined` is a valid key.
+
+The comparator must be a synchronous, pure equivalence relation (reflexive,
+symmetric, and transitive). Keep equality arguments and keys stable while the
+query is active. The active instance's comparator is called with the incoming
+query; if only the incoming instance has a comparator, that comparator is used
+instead. A `dedupKey()` without `dedupEquiv()` is a convenience for sharing directly
+by key using `Map` equality.
+
+The first active instance supplies the implementation and dependencies; other
+equivalent instances receive its values, including through `peek()`. The final
+unsubscribe or query completion removes that realization and its dedup entry,
+so the next subscription starts fresh. Separate query classes never share a
+realization merely because their keys or arguments match.
+
 #### One-shot queries
 
 A query that implements `fetch` and not `boot` is a **read**: it has one answer
@@ -527,6 +571,14 @@ engine.dispatch(new MyActionWithOptions());
 ## Provider Lifecycle: `obtain`, `release`, `flush`, and `dispose`
 Providers manage the lifecycle of the resources they provide.
 
+`engine.dispose()` stops accepting new engine work, shuts down queries, then
+waits for all accepted actions (including query lifecycle actions) to finish
+and release their resources before flushing and disposing providers. Aborting
+an action is cooperative: shutdown still waits for its execution and interceptor
+cleanup to finish. Concurrent disposal calls await the same shutdown. A standalone
+`dispatcher.dispose()` likewise stops new dispatches and drains accepted actions;
+it does not dispose its container.
+
 - **`obtain(options)`**: This method is called whenever a consumer (like an Action or Query) needs a resource. It's responsible for creating or acquiring the resource. It can optionally receive an `options` object from the consumer.
 
 - **`release(resource, options)`**: This is the counterpart to `obtain`. It's called after the consumer has finished its work. For providers that manage a pool of resources, this is where you would return the `resource` to the pool. For singleton-like providers, this method is often a no-op.
@@ -649,3 +701,17 @@ const WorkerProvider = Provider.fromPool(
 Actions, queries and interceptors are the other way around: they are consumers
 rather than resource managers, so they receive already-obtained **resources**,
 released for them when their work finishes.
+
+## Releasing
+
+Push a `package.json` version bump to `main` to publish automatically. The
+`Publish to npm` workflow installs dependencies, runs the tests, and checks the
+package contents before publishing to npm and creating the release tag and GitHub
+release with generated notes. Edits that leave the version unchanged skip release.
+
+If a release fails before npm publication, fix the problem on `main`, then select
+**Actions → Publish to npm → Run workflow → main** to retry the current version;
+the tests run again. If npm publication succeeded but the GitHub release failed,
+the same manual workflow completes the release using the original published
+commit. Published npm versions are immutable: shipping code fixes after a version
+has reached npm requires another version bump.

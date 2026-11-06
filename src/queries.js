@@ -310,6 +310,8 @@ export class QueryStore {
   #dispatcher;
   #interceptors;
   #controllers;
+  #dedupKeys = new Map();
+  #controllerKeys = new WeakMap();
   #disposed = false;
 
   constructor({ container, dispatcher, interceptors, createControllerMap } = {}) {
@@ -348,9 +350,64 @@ export class QueryStore {
   }
 
   _evict(queryInstance, controller) {
-    if (this.#controllers.get(queryInstance) === controller) {
-      this.#controllers.delete(queryInstance);
+    const record = this.#controllerKeys.get(controller);
+    if (!record || this.#controllers.get(record.registryKey) !== controller) {
+      return;
     }
+    this.#controllers.delete(record.registryKey);
+    this.#controllerKeys.delete(controller);
+    if (record.keys) {
+      record.bucket.splice(record.bucket.indexOf(record), 1);
+      if (record.bucket.length === 0) {
+        record.keys.delete(record.key);
+      }
+      if (record.keys.size === 0) {
+        this.#dedupKeys.delete(queryInstance.constructor);
+      }
+    }
+  }
+
+  // Equality defines sharing; an optional key narrows the comparison bucket.
+  // A key alone opts into Map equality. The first active instance supplies
+  // the implementation and dependencies, including its equality comparator.
+  #registryKey(queryInstance, create = false) {
+    const compares = typeof queryInstance.dedupEquiv === 'function';
+    const keyed = typeof queryInstance.dedupKey === 'function';
+    if (!compares && !keyed) {
+      return { registryKey: queryInstance };
+    }
+    const type = queryInstance.constructor;
+    const key = keyed ? queryInstance.dedupKey() : undefined;
+    let keys = this.#dedupKeys.get(type);
+    let bucket = keys?.get(key);
+    const match = bucket?.find((record) => {
+      if (record.query === queryInstance) {
+        return true;
+      }
+      if (typeof record.query.dedupEquiv === 'function') {
+        return record.query.dedupEquiv(queryInstance);
+      }
+      return compares ? queryInstance.dedupEquiv(record.query) : true;
+    });
+    if (match || !create) {
+      return match ?? {};
+    }
+    if (!keys) {
+      keys = new Map();
+      this.#dedupKeys.set(type, keys);
+    }
+    if (!bucket) {
+      bucket = [];
+      keys.set(key, bucket);
+    }
+    const record = { registryKey: {}, query: queryInstance, keys, bucket, key };
+    bucket.push(record);
+    return record;
+  }
+
+  #controller(queryInstance) {
+    const { registryKey } = this.#registryKey(queryInstance);
+    return registryKey === undefined ? undefined : this.#controllers.get(registryKey);
   }
 
   #queryDeps(queryInstance) {
@@ -376,7 +433,7 @@ export class QueryStore {
             ? { next: observerOrNext }
             : observerOrNext || {};
 
-        let controller = this.#controllers.get(queryInstance);
+        let controller = this.#controller(queryInstance);
         if (controller) {
           controller.observers.add(observer);
           if (controller.hasValue) {
@@ -388,7 +445,9 @@ export class QueryStore {
           }
         } else {
           controller = new QueryController(this, queryInstance);
-          this.#controllers.set(queryInstance, controller);
+          const record = this.#registryKey(queryInstance, true);
+          this.#controllerKeys.set(controller, record);
+          this.#controllers.set(record.registryKey, controller);
           controller.observers.add(observer);
           controller.boot();
         }
@@ -427,7 +486,7 @@ export class QueryStore {
       // that query, and a query with subscribers is expected to produce a
       // value.  Callers that cannot block should race it themselves.
       peek: async () => {
-        const controller = this.#controllers.get(queryInstance);
+        const controller = this.#controller(queryInstance);
         if (controller && (await controller.received)) {
           return controller.currentValue;
         }
