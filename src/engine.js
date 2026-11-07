@@ -12,8 +12,9 @@ export class Engine {
   #dispatcher;
   #queries;
   #disposed = false;
+  #disposal = null;
 
-  constructor({ providers, interceptors, hooks, container, dispatcher, queries } = {}) {
+  constructor({ providers, interceptors, hooks, container, dispatcher, queries, pending } = {}) {
     // Each layer can be supplied pre-built, which is how you swap one out
     // (a stub container in tests, a dispatcher shared with another engine).
     this.#container = container ?? new Container({ providers });
@@ -28,6 +29,7 @@ export class Engine {
         container: this.#container,
         dispatcher: this.#dispatcher,
         interceptors,
+        pending,
         createControllerMap: hooks?.createQueryControllersMap,
       });
   }
@@ -50,23 +52,33 @@ export class Engine {
 
   // Dispatch an action.
   dispatch(actionInstance) {
+    if (this.#disposed) {
+      throw new Error('The engine has been disposed');
+    }
     return this.#dispatcher.dispatch(actionInstance);
   }
 
-  // Realizes a query.
+  // Realizes a query as a Cell (with deprecated subscribe/peek compatibility).
   query(queryInstance) {
+    if (this.#disposed) {
+      throw new Error('The engine has been disposed');
+    }
     return this.#queries.query(queryInstance);
   }
 
-  async dispose() {
-    if (this.#disposed) {
-      return;
+  dispose() {
+    if (this.#disposal) {
+      return this.#disposal;
     }
     this.#disposed = true;
 
-    // Queries first: killing them releases resources back to the providers
-    // that are about to be disposed.
-    await this.#queries.dispose();
-    await this.#container.dispose();
+    this.#disposal = (async () => {
+      // Queries may dispatch lifecycle actions while shutting down. Drain those
+      // and every earlier action before destroying their providers.
+      await this.#queries.dispose();
+      await this.#dispatcher.dispose?.();
+      await this.#container.dispose();
+    })();
+    return this.#disposal;
   }
 }

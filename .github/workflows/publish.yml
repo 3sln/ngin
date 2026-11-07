@@ -1,57 +1,93 @@
 name: Publish to npm
 
-# Publishing a release (draft or otherwise) creates its tag and publishes the
-# package. Tests run first, so a red build cannot reach the registry.
-#
-# Requires an `NPM_TOKEN` repository secret — an npm automation token with
-# publish rights on the @3sln scope.
-
+# A version change on main publishes the package, then creates its GitHub release.
+# Keep this filename aligned with the npm trusted publisher configuration.
 on:
-  release:
-    types:
-      - published
+  push:
+    branches:
+      - main
+    paths:
+      - package.json
+  workflow_dispatch:
 
 permissions:
   contents: read
-  # Required for npm provenance. Drop this, and the --provenance flag below,
-  # if the repository is ever made private: provenance only works for packages
-  # published from a public repository.
-  id-token: write
 
 concurrency:
-  group: publish-${{ github.event.release.tag_name }}
+  group: publish
   cancel-in-progress: false
 
 jobs:
-  publish:
+  version:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.version.outputs.changed }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
-      - name: Checkout the released tag
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          ref: ${{ github.sha }}
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v1
-
-      - name: Check the tag matches package.json
+      - name: Detect a version change across the push
+        id: version
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
-          if [ "$TAG" != "v$version" ]; then
-            echo "::error::Release tag $TAG does not match package.json version $version."
-            echo 'Publishing would ship something other than what the release names.'
-            exit 1
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          echo "$TAG matches package.json."
+          if [ "$BEFORE" = 0000000000000000000000000000000000000000 ]; then
+            # A newly created main branch has no previous version.
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git cat-file -e "$BEFORE^{commit}"; then
+            git fetch origin "$BEFORE"
+          fi
+          previous="$(git show "$BEFORE:package.json" | node -e '
+            let text = "";
+            process.stdin.on("data", chunk => text += chunk);
+            process.stdin.on("end", () => console.log(JSON.parse(text).version));
+          ')"
+          if [ "$previous" = "$version" ]; then
+            echo 'Version unchanged; skipping publication.'
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    needs: version
+    if: needs.version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Required for npm trusted publishing through GitHub Actions OIDC.
+      id-token: write
+    steps:
+      - name: Checkout the versioned commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v1
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -62,14 +98,65 @@ jobs:
       - name: Show what will be published
         run: npm pack --dry-run
 
-      - name: Publish
-        run: npm publish --access public --provenance
+      - name: Publish unless this version is already on npm
+        id: publication
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Summarise
-        env:
-          TAG: ${{ github.event.release.tag_name }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          version="$(node -p "require('./package.json').version")"
-          echo "Published @3sln/ngin@$version from $TAG." >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          name="$(node -p "require('./package.json').name")"
+          target="$GITHUB_SHA"
+          if npm view "$name@$VERSION" version --json > npm-status.json 2> npm-status.log; then
+            echo "$name@$VERSION is already published; recovering the GitHub release."
+            target="$(npm view "$name@$VERSION" gitHead --json | node -e '
+              let text = "";
+              process.stdin.on("data", chunk => text += chunk);
+              process.stdin.on("end", () => {
+                const sha = JSON.parse(text);
+                if (typeof sha !== "string" || !/^[a-f0-9]{40}$/.test(sha)) process.exit(1);
+                console.log(sha);
+              });
+            ')"
+            if ! git cat-file -e "$target^{commit}"; then
+              git fetch origin "$target"
+            fi
+          else
+            # Only a missing version permits publication. Authentication, network,
+            # and registry failures must fail rather than masquerade as a 404.
+            node --input-type=module -e '
+              import { readFileSync } from "node:fs";
+              const missing = ["npm-status.json", "npm-status.log"].some(path => {
+                try { return JSON.parse(readFileSync(path, "utf8")).error?.code === "E404"; }
+                catch { return false; }
+              });
+              if (!missing) process.exit(1);
+            ' || { cat npm-status.json npm-status.log; exit 1; }
+            # Trusted publishing generates provenance automatically.
+            npm publish --access public
+          fi
+          echo "sha=$target" >> "$GITHUB_OUTPUT"
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+          RELEASE_SHA: ${{ steps.publication.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            tagged="$(git rev-parse "$TAG^{commit}")"
+            if [ "$tagged" != "$RELEASE_SHA" ]; then
+              echo "::error::Tag $TAG points to $tagged; npm publication belongs to $RELEASE_SHA."
+              exit 1
+            fi
+          fi
+          existing="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .id")"
+          if [ -n "$existing" ]; then
+            # Also recover a draft left by the former release workflow.
+            gh release edit "$TAG" --draft=false
+          else
+            gh release create "$TAG" --target "$RELEASE_SHA" --title "$TAG" --generate-notes
+          fi
+          echo "Released @3sln/ngin@$VERSION as $TAG." >> "$GITHUB_STEP_SUMMARY"

@@ -237,6 +237,8 @@ function missing(wanted) {
 export class Dispatcher {
   #container;
   #interceptors;
+  #active = new Set();
+  #disposal = null;
 
   constructor({ container, interceptors } = {}) {
     this.#container = container ?? new Container();
@@ -254,6 +256,9 @@ export class Dispatcher {
   // Dispatch an action.  Returns the dispatch feed immediately; the action
   // itself runs on a later turn of the event loop.
   dispatch(actionInstance) {
+    if (this.#disposal) {
+      throw new Error('The dispatcher has been disposed');
+    }
     if (!(actionInstance instanceof Action)) {
       throw new TypeError('dispatch() requires an instance of Action');
     }
@@ -262,67 +267,82 @@ export class Dispatcher {
     const interceptors = this.#interceptors;
     const engineFeed = container.feed;
     const dispatchFeed = new DispatchFeed();
+    // Register before scheduling: disposal must also wait for accepted actions
+    // that have not started yet, including their interceptor cleanup.
+    const done = Promise.withResolvers();
+    this.#active.add(done.promise);
 
     setTimeout(async () => {
-      const stack = new InterceptorStack({
-        container,
-        interceptors,
-        // `action` is the key that tells an interceptor which of the two kinds
-        // of work it is wrapping; a query puts `query` here instead.
-        context: () => ({
-          dispatchFeed,
-          engineFeed,
-          signal: dispatchFeed.signal,
-          action: actionInstance,
-        }),
-        aborted: () =>
-          dispatchFeed.signal.aborted ? { reason: dispatchFeed.reason } : null,
-      });
-
-      let error = null;
       try {
-        await stack.run(async (state) => {
-          // Instance deps override static ones of the same name.
-          const lease = await container.lease(
-            actionInstance.constructor.deps,
-            actionInstance.deps
-          );
-          try {
-            await actionInstance.execute(lease.resources, {
-              dispatchFeed,
-              engineFeed,
-              // Cooperative: aborting cannot interrupt a running function, so an
-              // action that wants to be stoppable checks this, or hands it to
-              // something that does (fetch, a scan loop, another dispatch).
-              signal: dispatchFeed.signal,
-              state,
-            });
-          } finally {
-            await lease.release();
-          }
+        const stack = new InterceptorStack({
+          container,
+          interceptors,
+          // `action` is the key that tells an interceptor which of the two kinds
+          // of work it is wrapping; a query puts `query` here instead.
+          context: () => ({
+            dispatchFeed,
+            engineFeed,
+            signal: dispatchFeed.signal,
+            action: actionInstance,
+          }),
+          aborted: () =>
+            dispatchFeed.signal.aborted ? { reason: dispatchFeed.reason } : null,
         });
-      } catch (e) {
-        error = e;
-      }
 
-      // An aborted dispatch ends on `abort`, whatever the action did on its way
-      // out. It did not complete -- it was stopped -- and an action that threw
-      // because it honoured the signal threw *because* of the abort, so
-      // reporting the throw would name the symptom rather than the cause. The
-      // error is carried on the event either way, so nothing is lost.
-      if (dispatchFeed.signal.aborted) {
-        dispatchFeed.dispatchEvent(
-          new DispatchAbortEvent({ reason: dispatchFeed.reason, error })
-        );
-      } else if (error) {
-        dispatchFeed.dispatchEvent(
-          new DispatchErrorEvent('error', { error, message: messageOf(error) })
-        );
-      } else {
-        dispatchFeed.dispatchEvent(new Event('complete'));
+        let error = null;
+        try {
+          await stack.run(async (state) => {
+            // Instance deps override static ones of the same name.
+            const lease = await container.lease(
+              actionInstance.constructor.deps,
+              actionInstance.deps
+            );
+            try {
+              await actionInstance.execute(lease.resources, {
+                dispatchFeed,
+                engineFeed,
+                // Cooperative: aborting cannot interrupt a running function, so an
+                // action that wants to be stoppable checks this, or hands it to
+                // something that does (fetch, a scan loop, another dispatch).
+                signal: dispatchFeed.signal,
+                state,
+              });
+            } finally {
+              await lease.release();
+            }
+          });
+        } catch (e) {
+          error = e;
+        }
+
+        // An aborted dispatch ends on `abort`, whatever the action did on its way
+        // out. It did not complete -- it was stopped -- and an action that threw
+        // because it honoured the signal threw *because* of the abort, so
+        // reporting the throw would name the symptom rather than the cause. The
+        // error is carried on the event either way, so nothing is lost.
+        if (dispatchFeed.signal.aborted) {
+          dispatchFeed.dispatchEvent(
+            new DispatchAbortEvent({ reason: dispatchFeed.reason, error })
+          );
+        } else if (error) {
+          dispatchFeed.dispatchEvent(
+            new DispatchErrorEvent('error', { error, message: messageOf(error) })
+          );
+        } else {
+          dispatchFeed.dispatchEvent(new Event('complete'));
+        }
+      } finally {
+        this.#active.delete(done.promise);
+        done.resolve();
       }
     });
 
     return dispatchFeed;
+  }
+
+  // Stop accepting work and wait for every accepted action to release its
+  // resources. Cancellation alone cannot guarantee that an action has stopped.
+  dispose() {
+    return this.#disposal ??= Promise.all([...this.#active]).then(() => {});
   }
 }
