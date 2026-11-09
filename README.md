@@ -14,7 +14,7 @@ It is built as three independent layers, so you can take only what you need:
 | --- | --- | --- | --- |
 | Dependency injection | `@3sln/ngin/providers` | `Provider`, `Container` | — |
 | Actions | `@3sln/ngin/actions` | `Action`, `Dispatcher`, `DispatchFeed` | providers |
-| Queries | `@3sln/ngin/queries` | `Query`, `QueryStore`, `PENDING` | providers |
+| Queries | `@3sln/ngin/queries` | `Query`, `QueryStore` | providers |
 | Everything | `@3sln/ngin` | all of the above, plus `Engine` | — |
 
 Actions and queries are siblings: neither imports the other. See
@@ -23,7 +23,7 @@ Actions and queries are siblings: neither imports the other. See
 ## Quick Start
 
 ```javascript
-import { Engine, Action, Query, Provider, PENDING } from '@3sln/ngin';
+import { Engine, Action, Query, Provider } from '@3sln/ngin';
 
 // Set up a LoggerProvider. It's a dependency for other stuff.
 class LoggerProvider extends Provider {
@@ -117,8 +117,7 @@ console.log('--- Query Lifecycle ---');
 // Queries expose Cells: subscribe to invalidation, then pull the latest value.
 const queryCell = engine.query(new MyQuery());
 const renderQuery = () => {
-  const value = queryCell.getValue();
-  if (value !== PENDING) console.log(`Query received value: ${value}`);
+  if (queryCell.hasValue()) console.log(`Query received value: ${queryCell.getValue()}`);
 };
 const stop = queryCell.onDirty(renderQuery);
 renderQuery();
@@ -188,7 +187,7 @@ dispatcher.dispatch(new MyAction());
 
 ```javascript
 import { Container } from '@3sln/ngin/providers';
-import { QueryStore, PENDING } from '@3sln/ngin/queries';
+import { QueryStore } from '@3sln/ngin/queries';
 
 const queries = new QueryStore({
   container: new Container({ providers }),
@@ -197,8 +196,7 @@ const queries = new QueryStore({
 
 const result = queries.query(new MyQuery());
 const read = () => {
-  const value = result.getValue();
-  if (value !== PENDING) console.log(value);
+  if (result.hasValue()) console.log(result.getValue());
 };
 const stop = result.onDirty(read);
 read();
@@ -210,17 +208,18 @@ query you realize declares a `bootAction` or `killAction`.
 
 #### Query Cells
 
-`engine.query(instance)` and `queries.query(instance)` return a Cell with two
-methods: `onDirty(listener)` registers an invalidation callback and returns an
-idempotent unsubscribe function; `getValue()` synchronously reads the current
+`engine.query(instance)` and `queries.query(instance)` return a Cell with three
+methods: `hasValue()` reports whether a value has arrived; `onDirty(listener)`
+registers an invalidation callback and returns an idempotent unsubscribe function; `getValue()` synchronously reads the current
 value. A dirty callback receives no arguments: pull the value when you need it,
 so consumers can coalesce several invalidations into one read.
 
 The first dirty listener boots the query, and the last unsubscribe kills it.
 Legacy subscribers count toward the same lifetime. `getValue()` never starts a
-query, leases resources, or calls `fetch()`. Before a value arrives it returns
-the exported `PENDING` symbol; an emitted `undefined` is an ordinary value.
-Failures notify listeners and throw from `getValue()`. Catch errors at the
+query, leases resources, or calls `fetch()`. `hasValue()` is equally lazy.
+Before a value arrives `hasValue()` returns false and `getValue()` returns
+`undefined`; after an emitted `undefined`, `hasValue()` returns true.
+Failures notify listeners and throw from both methods. Catch errors at the
 consumer's read boundary. Disconnected Cells retain their last observed value
 or failure. Reconnecting after the realization ends starts with pending state
 and retries the query; an already active realization supplies its current state.
@@ -228,23 +227,19 @@ and retries the query; an already active realization supplies its current state.
 Repeated calls with the same query instance return the same Cell. A Cell can
 also read an equivalent query's active value through the dedup hooks below.
 
-Cells compose directly with dodo's reactive helpers. Because dodo uses its own
-pending symbol, configure that exact sentinel when constructing the engine or
-store. ngin has no dependency on dodo:
+Cells compose directly with dodo's hook-aware reactive helpers, without a
+shared sentinel or per-library configuration. ngin has no dependency on dodo:
 
 ```js
 import { Engine } from '@3sln/ngin';
-import { PENDING, derive, effect } from '@3sln/dodo/reactive';
+import { derive, effect } from '@3sln/dodo/reactive';
 
-const engine = new Engine({ providers, pending: PENDING });
+const engine = new Engine({ providers });
 const items = engine.query(new ReadItems('photos'));
 const count = derive([items], (values) => values.length);
 const stop = effect(count, (value) => console.log(`${value} items`));
 // count also works as the source for dodo's watch(count, renderCount).
 ```
-
-`new QueryStore({ pending: PENDING })` supports the same configuration. When
-supplying a prebuilt store to `Engine`, configure the sentinel on that store.
 
 The previous `subscribe(observerOrNext)` and asynchronous `peek()` methods
 remain on the Cell for backward compatibility and are deprecated. Legacy
@@ -313,8 +308,7 @@ class ReadItems extends Query {
 
 const items = engine.query(new ReadItems('photos'));
 const renderItems = () => {
-  const value = items.getValue();
-  if (value !== PENDING) render(value);
+  if (items.hasValue()) render(items.getValue());
 };
 const stop = items.onDirty(renderItems);
 renderItems();
