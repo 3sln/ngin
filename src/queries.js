@@ -10,16 +10,14 @@ import { Container } from './providers.js';
 import { InterceptorStack } from './interceptors.js';
 import { report } from './internal.js';
 
-// Consumers may configure another protocol's sentinel (for example dodo's).
-export const PENDING = Symbol('ngin.query.PENDING');
-
 // The Cell owns one upstream observer regardless of its listener count. Legacy
 // observers still use that same controller through subscribe(). Reads never
 // connect or fetch: only the first dirty listener starts a realization.
-function asCell(handle, pending, readActive, assertAvailable) {
+function asCell(handle, readActive, assertAvailable) {
   const listeners = new Set();
   let subscription = null;
-  let value = pending;
+  let value;
+  let received = false;
   let failed = false;
   let failure;
 
@@ -43,13 +41,15 @@ function asCell(handle, pending, readActive, assertAvailable) {
       const registration = { listener };
       listeners.add(registration);
       if (listeners.size === 1) {
-        value = pending;
+        value = undefined;
+        received = false;
         failed = false;
         failure = undefined;
         try {
           subscription = handle.subscribe({
             next(nextValue) {
               value = nextValue;
+              received = true;
               failed = false;
               failure = undefined;
               notify();
@@ -77,9 +77,15 @@ function asCell(handle, pending, readActive, assertAvailable) {
         }
       };
     },
+    hasValue() {
+      const active = readActive();
+      if (active) return active.hasValue;
+      if (failed) throw failure;
+      return received;
+    },
     getValue() {
       const active = readActive();
-      if (active) return active.hasValue ? active.currentValue : pending;
+      if (active) return active.currentValue;
       if (failed) throw failure;
       return value;
     },
@@ -390,13 +396,11 @@ export class QueryStore {
   #dedupKeys = new Map();
   #controllerKeys = new WeakMap();
   #cells = new WeakMap();
-  #pending;
   #disposed = false;
 
-  constructor({ container, dispatcher, interceptors, createControllerMap, pending = PENDING } = {}) {
+  constructor({ container, dispatcher, interceptors, createControllerMap } = {}) {
     this.#container = container ?? new Container();
     this.#dispatcher = dispatcher ?? null;
-    this.#pending = pending;
     // Copied here rather than per query, same as the dispatcher: the list is
     // fixed at construction, and mutating it afterwards has no effect.
     this.#interceptors = interceptors ? [...interceptors] : [];
@@ -505,7 +509,7 @@ export class QueryStore {
     if (existing) return existing;
 
     const handle = {
-      /** @deprecated Use onDirty() and getValue() instead. */
+      /** @deprecated Use onDirty(), hasValue(), and getValue() instead. */
       subscribe: (observerOrNext) => {
         if (this.#disposed) {
           throw new Error('The query store has been disposed');
@@ -613,7 +617,6 @@ export class QueryStore {
     };
     const cell = asCell(
       handle,
-      this.#pending,
       () => this.#controller(queryInstance),
       () => {
         if (this.#disposed) throw new Error('The query store has been disposed');

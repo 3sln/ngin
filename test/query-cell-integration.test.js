@@ -1,5 +1,5 @@
 import { test, expect, spyOn } from 'bun:test';
-import { Engine, Provider, Query, QueryStore, PENDING } from '../index.js';
+import { Engine, Provider, Query, QueryStore } from '../index.js';
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -51,10 +51,12 @@ test('equivalent Cell handles read shared active state and reconnect to fresh re
   const first = store.query(new Live());
   const second = store.query(new Live());
   const readOnly = store.query(new Live());
-  expect(readOnly.getValue()).toBe(PENDING);
+  expect(readOnly.hasValue()).toBe(false);
+  expect(readOnly.getValue()).toBeUndefined();
   expect(boots).toBe(0);
   const stopFirst = first.onDirty(() => {});
   await tick();
+  expect(readOnly.hasValue()).toBe(true);
   expect(readOnly.getValue()).toBe(1);
   const stopSecond = second.onDirty(() => {});
   expect(second.getValue()).toBe(1);
@@ -63,7 +65,8 @@ test('equivalent Cell handles read shared active state and reconnect to fresh re
   await tick();
   expect(first.getValue()).toBe(1);
   const stopAgain = second.onDirty(() => {});
-  expect(first.getValue()).toBe(PENDING);
+  expect(first.hasValue()).toBe(false);
+  expect(first.getValue()).toBeUndefined();
   await tick();
   expect(first.getValue()).toBe(2);
   expect(boots).toBe(2);
@@ -85,17 +88,23 @@ test('undefined results differ from pending and undefined failures survive getVa
   }
   const handle = store.query(new Read());
   try {
-    expect(handle.getValue()).toBe(PENDING);
+    expect(handle.hasValue()).toBe(false);
+    expect(handle.getValue()).toBeUndefined();
     const stop = handle.onDirty(() => {});
     await tick();
     let threw = false;
     try { handle.getValue(); } catch (error) { threw = true; expect(error).toBeUndefined(); }
     expect(threw).toBe(true);
+    threw = false;
+    try { handle.hasValue(); } catch (error) { threw = true; expect(error).toBeUndefined(); }
+    expect(threw).toBe(true);
     stop();
     const stopAgain = handle.onDirty(() => {});
-    expect(handle.getValue()).toBe(PENDING);
+    expect(handle.hasValue()).toBe(false);
+    expect(handle.getValue()).toBeUndefined();
     await tick();
     expect(handle.getValue()).toBeUndefined();
+    expect(handle.hasValue()).toBe(true);
     expect(attempts).toBe(2);
     stopAgain();
   } finally {

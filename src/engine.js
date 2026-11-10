@@ -14,7 +14,7 @@ export class Engine {
   #disposed = false;
   #disposal = null;
 
-  constructor({ providers, interceptors, hooks, container, dispatcher, queries, pending } = {}) {
+  constructor({ providers, interceptors, hooks, container, dispatcher, queries } = {}) {
     // Each layer can be supplied pre-built, which is how you swap one out
     // (a stub container in tests, a dispatcher shared with another engine).
     this.#container = container ?? new Container({ providers });
@@ -29,7 +29,6 @@ export class Engine {
         container: this.#container,
         dispatcher: this.#dispatcher,
         interceptors,
-        pending,
         createControllerMap: hooks?.createQueryControllersMap,
       });
   }
